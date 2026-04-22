@@ -7,7 +7,7 @@ import { inngest } from "./inngest/client";
 import { sweep, processRecording } from "./inngest/functions/ingest";
 import { db, recordings, transcripts } from "./lib/db";
 import pinoLogger from "./lib/logger";
-import { eq } from "drizzle-orm";
+import { eq, count } from "drizzle-orm";
 
 const app = new OpenAPIHono();
 
@@ -102,7 +102,15 @@ const listTranscriptsRoute = createRoute({
     200: {
       content: {
         "application/json": {
-          schema: z.object({ data: z.array(RecordingSchema) }),
+          schema: z.object({
+            data: z.array(RecordingSchema),
+            pagination: z.object({
+              total: z.number().int(),
+              limit: z.number().int(),
+              offset: z.number().int(),
+              hasMore: z.boolean(),
+            }),
+          }),
         },
       },
       description: "List of recordings",
@@ -134,6 +142,30 @@ const getTranscriptRoute = createRoute({
         },
       },
       description: "Recording with transcript",
+    },
+    404: {
+      content: { "application/json": { schema: ErrorSchema } },
+      description: "Not found",
+    },
+  },
+});
+
+const deleteTranscriptRoute = createRoute({
+  method: "delete",
+  path: "/transcripts/{id}",
+  tags: ["Transcripts"],
+  summary: "Delete a recording and its transcript",
+  request: {
+    params: z.object({
+      id: z.string().min(1).openapi({
+        param: { name: "id", in: "path" },
+        example: "abc123-1234567890",
+      }),
+    }),
+  },
+  responses: {
+    204: {
+      description: "Deleted successfully",
     },
     404: {
       content: { "application/json": { schema: ErrorSchema } },
@@ -205,12 +237,21 @@ const ingestRoute = createRoute({
 app.openapi(listTranscriptsRoute, async (c) => {
   const { limit, offset, status } = c.req.valid("query");
 
-  let query = db.select().from(recordings);
-  if (status) {
-    query = query.where(eq(recordings.status, status)) as typeof query;
-  }
-  const data = await query.limit(limit).offset(offset);
-  return c.json({ data }, 200);
+  const where = status ? eq(recordings.status, status) : undefined;
+
+  const [[{ total }], data] = await Promise.all([
+    where
+      ? db.select({ total: count() }).from(recordings).where(where)
+      : db.select({ total: count() }).from(recordings),
+    where
+      ? db.select().from(recordings).where(where).limit(limit).offset(offset)
+      : db.select().from(recordings).limit(limit).offset(offset),
+  ]);
+
+  return c.json({
+    data,
+    pagination: { total, limit, offset, hasMore: offset + data.length < total },
+  }, 200);
 });
 
 app.openapi(getTranscriptRoute, async (c) => {
@@ -233,6 +274,25 @@ app.openapi(getTranscriptRoute, async (c) => {
     .limit(1);
 
   return c.json({ recording, transcript: transcript ?? null }, 200);
+});
+
+app.openapi(deleteTranscriptRoute, async (c) => {
+  const { id } = c.req.valid("param");
+
+  const [recording] = await db
+    .select()
+    .from(recordings)
+    .where(eq(recordings.id, id))
+    .limit(1);
+
+  if (!recording) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  await db.delete(transcripts).where(eq(transcripts.recordingId, id));
+  await db.delete(recordings).where(eq(recordings.id, id));
+
+  return c.body(null, 204);
 });
 
 // BBB record IDs look like: {sha1hex}-{unix_ms}
