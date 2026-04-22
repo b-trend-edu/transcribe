@@ -1,8 +1,8 @@
 services:
   app:
     build: .
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       - BBB_BASE_URL=${BBB_BASE_URL}
       - BBB_SHARED_SECRET=${BBB_SHARED_SECRET}
