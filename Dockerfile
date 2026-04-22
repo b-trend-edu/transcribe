@@ -13,8 +13,5 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 COPY . .
 
-# Create data directory for SQLite
-RUN mkdir -p data
-
 EXPOSE 3000
-CMD ["bun", "run", "src/index.ts"]
+CMD ["sh", "-c", "bun run src/migrate.ts && exec bun run src/index.ts"]
