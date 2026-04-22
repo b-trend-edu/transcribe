@@ -1,15 +1,19 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
+import { logger as honoLogger } from "hono/logger";
 import { Scalar } from "@scalar/hono-api-reference";
 import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
 import { sweep, processRecording } from "./inngest/functions/ingest";
 import { db, recordings, transcripts } from "./lib/db";
+import pinoLogger from "./lib/logger";
 import { eq } from "drizzle-orm";
 
 const app = new OpenAPIHono();
 
 // --- Middleware ---
+
+app.use(honoLogger((str) => pinoLogger.info(str)));
 
 app.use(
   "*",
