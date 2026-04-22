@@ -1,0 +1,75 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - app_data:/app/data
+    environment:
+      - BBB_BASE_URL=${BBB_BASE_URL}
+      - BBB_SHARED_SECRET=${BBB_SHARED_SECRET}
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - INNGEST_BASE_URL=http://inngest:8288
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - DATABASE_PATH=data/app.db
+    depends_on:
+      inngest:
+        condition: service_healthy
+    restart: unless-stopped
+
+  inngest:
+    image: inngest/inngest
+    command: "inngest start"
+    expose:
+      - "8288"
+      - "8289"
+    environment:
+      # Both keys must be hex strings with an even number of characters
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - INNGEST_POSTGRES_URI=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/inngest
+      - INNGEST_REDIS_URI=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8288/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:17
+    environment:
+      - POSTGRES_DB=inngest
+      - POSTGRES_USER=inngest
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inngest -d inngest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  app_data:
+  postgres_data:
+  redis_data:
