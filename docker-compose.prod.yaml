@@ -16,6 +16,12 @@ services:
       inngest:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 16g     # Whisper large=~10g, medium=~5g, base=~1g — 2 concurrent jobs need 2x
+        reservations:
+          memory: 2g
 
   inngest:
     image: inngest/inngest
@@ -41,6 +47,12 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
 
   postgres:
     image: postgres:17
@@ -57,6 +69,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
 
   redis:
     image: redis:7-alpine
@@ -68,6 +86,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 128m
 
 volumes:
   postgres_data:

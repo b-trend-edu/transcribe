@@ -41,7 +41,7 @@ const transcriptsQuerySchema = z.object({
 app.get(
   "/transcripts",
   zValidator("query", transcriptsQuerySchema),
-  (c) => {
+  async (c) => {
     const { limit, offset, status } = c.req.valid("query");
 
     let query = db.select().from(recordings);
@@ -50,7 +50,7 @@ app.get(
       query = query.where(eq(recordings.status, status)) as typeof query;
     }
 
-    const data = query.limit(limit).offset(offset).all();
+    const data = await query.limit(limit).offset(offset);
 
     return c.json({ data });
   }
@@ -63,26 +63,26 @@ const transcriptParamSchema = z.object({
 app.get(
   "/transcripts/:id",
   zValidator("param", transcriptParamSchema),
-  (c) => {
+  async (c) => {
     const { id } = c.req.valid("param");
 
-    const recording = db
+    const [recording] = await db
       .select()
       .from(recordings)
       .where(eq(recordings.id, id))
-      .get();
+      .limit(1);
 
     if (!recording) {
       return c.json({ error: "Not found" }, 404);
     }
 
-    const transcript = db
+    const [transcript] = await db
       .select()
       .from(transcripts)
       .where(eq(transcripts.recordingId, id))
-      .get() ?? null;
+      .limit(1);
 
-    return c.json({ recording, transcript });
+    return c.json({ recording, transcript: transcript ?? null });
   }
 );
 
@@ -118,20 +118,18 @@ app.post(
 
     const { id, videoUrl } = bbb;
 
-    const existing = db.select().from(recordings).where(eq(recordings.id, id)).get();
+    const [existing] = await db.select().from(recordings).where(eq(recordings.id, id)).limit(1);
     if (existing) {
       return c.json({ id, status: existing.status, alreadyQueued: true });
     }
 
-    db.insert(recordings)
-      .values({
-        id,
-        meetingId: id,
-        meetingName: name ?? id,
-        videoUrl,
-        status: "pending",
-      })
-      .run();
+    await db.insert(recordings).values({
+      id,
+      meetingId: id,
+      meetingName: name ?? id,
+      videoUrl,
+      status: "pending",
+    });
 
     await inngest.send({
       name: "bbb/ingest.process",

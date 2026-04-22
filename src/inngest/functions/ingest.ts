@@ -5,7 +5,7 @@ import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { eq } from "drizzle-orm";
 import { mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
-import * as  z  from "zod";
+import * as z from "zod";
 
 const envSchema = z.object({
   BBB_BASE_URL: z.string(),
@@ -47,26 +47,21 @@ export const sweep = inngest.createFunction(
       const { BBB_BASE_URL, BBB_SHARED_SECRET } = getEnv();
       const bbbRecordings = await fetchRecordings(BBB_BASE_URL, BBB_SHARED_SECRET);
 
-      const existing = db
-        .select({ id: recordings.id })
-        .from(recordings)
-        .all();
+      const existing = await db.select({ id: recordings.id }).from(recordings);
       const existingIds = new Set(existing.map((r) => r.id));
 
       const newOnes = bbbRecordings.filter((r) => !existingIds.has(r.recordId));
 
       for (const rec of newOnes) {
-        db.insert(recordings)
-          .values({
-            id: rec.recordId,
-            meetingId: rec.meetingId,
-            meetingName: rec.meetingName,
-            startTime: rec.startTime,
-            endTime: rec.endTime,
-            videoUrl: rec.videoUrl,
-            status: "pending",
-          })
-          .run();
+        await db.insert(recordings).values({
+          id: rec.recordId,
+          meetingId: rec.meetingId,
+          meetingName: rec.meetingName,
+          startTime: rec.startTime,
+          endTime: rec.endTime,
+          videoUrl: rec.videoUrl,
+          status: "pending",
+        });
       }
 
       return newOnes.map((r) => ({
@@ -101,15 +96,13 @@ export const processRecording = inngest.createFunction(
       const parsed = failureEventSchema.safeParse(event);
       if (!parsed.success) return;
       const { recordingId } = parsed.data.data;
-      const errorMessage = error.message;
-      db.update(recordings)
+      await db.update(recordings)
         .set({
           status: "failed",
-          error: errorMessage,
+          error: error.message,
           updatedAt: Math.floor(Date.now() / 1000),
         })
-        .where(eq(recordings.id, recordingId))
-        .run();
+        .where(eq(recordings.id, recordingId));
     },
   },
   async ({ event, step }) => {
@@ -120,10 +113,9 @@ export const processRecording = inngest.createFunction(
     const { recordingId, videoUrl } = parsed.data.data;
 
     const audioPath = await step.run(`download-${recordingId}`, async () => {
-      db.update(recordings)
+      await db.update(recordings)
         .set({ status: "downloading", updatedAt: Math.floor(Date.now() / 1000) })
-        .where(eq(recordings.id, recordingId))
-        .run();
+        .where(eq(recordings.id, recordingId));
 
       mkdirSync(TEMP_DIR, { recursive: true });
       const outputPath = join(TEMP_DIR, `${recordingId}.mp4`);
@@ -138,17 +130,16 @@ export const processRecording = inngest.createFunction(
     });
 
     const result = await step.run(`transcribe-${recordingId}`, async () => {
-      db.update(recordings)
+      await db.update(recordings)
         .set({ status: "transcribing", updatedAt: Math.floor(Date.now() / 1000) })
-        .where(eq(recordings.id, recordingId))
-        .run();
+        .where(eq(recordings.id, recordingId));
 
       return await transcribe(audioPath, getEnv().WHISPER_MODEL);
     });
 
     await step.run(`store-${recordingId}`, async () => {
       const { WHISPER_MODEL } = getEnv();
-      db.insert(transcripts)
+      await db.insert(transcripts)
         .values({
           recordingId,
           text: result.text,
@@ -165,18 +156,16 @@ export const processRecording = inngest.createFunction(
             model: WHISPER_MODEL,
             createdAt: Math.floor(Date.now() / 1000),
           },
-        })
-        .run();
+        });
 
-      db.update(recordings)
+      await db.update(recordings)
         .set({ status: "completed", updatedAt: Math.floor(Date.now() / 1000) })
-        .where(eq(recordings.id, recordingId))
-        .run();
+        .where(eq(recordings.id, recordingId));
 
       try {
         unlinkSync(audioPath);
       } catch {
-        // Ignore cleanup errors
+        // ignore cleanup errors
       }
     });
 
