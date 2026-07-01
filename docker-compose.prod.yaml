@@ -43,9 +43,11 @@ services:
       # persist whisper / align / pyannote weights across restarts & redeploys
       - whisperx_models:/models
       # Read recording media directly from the BBB host (same box), read-only.
-      # Adjust the host path if your BBB stores recordings elsewhere. Captions are
-      # still written back via the putRecordingTextTrack API, not this mount.
-      - /var/bigbluebutton/presentation:/recordings:ro
+      # Host path is deployment-specific — override with RECORDINGS_HOST_DIR in
+      # Coolify. Default is the standard BBB published dir; some setups use
+      # /var/bigbluebutton/presentation instead. Captions are still written back
+      # via the putRecordingTextTrack API, not this mount.
+      - ${RECORDINGS_HOST_DIR:-/var/bigbluebutton/published/presentation}:/recordings:ro
     depends_on:
       inngest:
         condition: service_healthy
