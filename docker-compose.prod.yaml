@@ -1,6 +1,12 @@
 services:
   app:
-    build: .
+    # Image is built & pushed by GitHub Actions (.github/workflows/build.yml);
+    # Coolify pulls it — it does not build from source. Override the tag with
+    # ${IMAGE_TAG} in Coolify if you want to pin a specific build.
+    image: ghcr.io/artzkaizen/transcribe:${IMAGE_TAG:-latest}
+    pull_policy: always
+    # torch 2.8.0 cu128 wheels are amd64-only (see Dockerfile).
+    platform: linux/amd64
     expose:
       - "3000"
     environment:
@@ -9,9 +15,26 @@ services:
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_BASE_URL=http://inngest:8288
-      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
       - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
+      # ---- WhisperX (GPU + speaker diarization) ----
+      - WHISPERX_DEVICE=${WHISPERX_DEVICE:-cuda}
+      - WHISPERX_COMPUTE_TYPE=${WHISPERX_COMPUTE_TYPE:-float16}
+      - WHISPERX_BATCH_SIZE=${WHISPERX_BATCH_SIZE:-16}
+      - DIARIZE=${DIARIZE:-false}
+      - MIN_SPEAKERS=${MIN_SPEAKERS:-}
+      - MAX_SPEAKERS=${MAX_SPEAKERS:-}
+      # HuggingFace read token for the gated pyannote diarization models.
+      # The token's account MUST have accepted the pyannote model licenses.
+      - HF_TOKEN=${HF_TOKEN:-}
+      # keep the weight-cache env aligned with the volume mount below
+      - HF_HOME=/models/huggingface
+      - TORCH_HOME=/models/torch
+      - XDG_CACHE_HOME=/models/cache
+    volumes:
+      # persist whisper / align / pyannote weights across restarts & redeploys
+      - whisperx_models:/models
     depends_on:
       inngest:
         condition: service_healthy
@@ -19,9 +42,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 16g     # Whisper large=~10g, medium=~5g, base=~1g — 2 concurrent jobs need 2x
+          memory: 16g     # host RAM; VRAM is the real ceiling (large-v3 + diarization ~10-13 GB)
         reservations:
           memory: 2g
+          # ---- GPU access (NVIDIA Container Toolkit required on the host) ----
+          devices:
+            - driver: nvidia
+              count: all           # or `count: 1` / `device_ids: ["0"]` (count & device_ids are mutually exclusive)
+              capabilities: [gpu]
 
   inngest:
     image: inngest/inngest
@@ -95,3 +123,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  whisperx_models:   # persistent HF/torch/whisper model + weight cache (mounted at /models in `app`)

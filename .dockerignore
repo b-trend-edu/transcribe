@@ -3,3 +3,6 @@ data/
 .env
 *.db
 .git/
+.github/
+docs/
+*.md

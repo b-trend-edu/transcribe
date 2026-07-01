@@ -30,6 +30,24 @@ export function buildApiUrl(
   return `${baseUrl}/api/${apiCall}?${queryString}&checksum=${checksum}`;
 }
 
+/**
+ * Map a recording's playback-page URL (what getRecordings returns in
+ * `playback.format.url`) to the actual downloadable webcam+audio media.
+ *
+ * The playback URL is an HTML player page (`…/playback/presentation/2.3/<id>`);
+ * the media lives at `<origin>/presentation/<recordId>/video/webcams.<ext>` on
+ * the SAME host (see the bbb-player buildFileURL convention). The webcams stream
+ * carries the mixed meeting audio (deskshare.webm is muted screen video).
+ */
+export function buildWebcamsUrl(
+  playbackUrl: string,
+  recordId: string,
+  ext: "webm" | "mp4" = "webm"
+): string {
+  const origin = new URL(playbackUrl).origin;
+  return `${origin}/presentation/${recordId}/video/webcams.${ext}`;
+}
+
 const bbbRecordingSchema = z.object({
   recordID: z.coerce.string(),
   meetingID: z.coerce.string(),

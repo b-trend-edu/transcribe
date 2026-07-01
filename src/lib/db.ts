@@ -36,7 +36,7 @@ export const transcripts = pgTable("transcripts", {
   vtt: text("vtt"),
   language: text("language"),
   durationSeconds: real("duration_seconds"),
-  model: text("model").default("base"),
+  model: text("model").default("large-v3"),
   createdAt: integer("created_at").default(sql`extract(epoch from now())::integer`),
 });
 
