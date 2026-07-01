@@ -2,7 +2,7 @@ import { inngest } from "../client";
 import { db, recordings, transcripts } from "../../lib/db";
 import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
-import { resolveLocalMedia } from "../../lib/media";
+import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
 import logger from "../../lib/logger";
 import { eq } from "drizzle-orm";
 import { mkdirSync, unlinkSync, symlinkSync } from "fs";
@@ -124,6 +124,64 @@ export const sweep = inngest.createFunction(
     if (newRecordings.length > 0) {
       await step.sendEvent(
         "dispatch-process-events",
+        newRecordings.map((r) => ({
+          name: "bbb/ingest.process" as const,
+          data: { recordingId: r.recordingId, videoUrl: r.videoUrl },
+        }))
+      );
+    }
+
+    return { newRecordings: newRecordings.length };
+  }
+);
+
+// --- Function 1b: Scan the mounted recordings dir for new recordings (cron) ---
+// Discovers recordings straight off disk (no BBB API / no 4h wait) when the
+// service runs on the BBB host with the recordings dir mounted. Idempotent: keyed
+// by record id, so recordings already in the table are skipped. Coexists with the
+// getRecordings sweep — both dedup on the same id, so nothing is processed twice.
+
+export const scanRecordings = inngest.createFunction(
+  { id: "bbb/ingest.scan", triggers: [{ cron: "0 * * * *" }] },
+  async ({ step }) => {
+    const newRecordings = await step.run("scan-local-recordings", async () => {
+      const { RECORDINGS_DIR, BBB_BASE_URL } = getEnv();
+      if (!RECORDINGS_DIR) return [];
+
+      const ids = listLocalRecordingIds(RECORDINGS_DIR);
+      if (ids.length === 0) return [];
+
+      const existing = await db.select({ id: recordings.id }).from(recordings);
+      const existingIds = new Set(existing.map((r) => r.id));
+      const newIds = ids.filter((id) => !existingIds.has(id));
+      if (newIds.length === 0) return [];
+
+      const origin = new URL(BBB_BASE_URL).origin;
+
+      const rows = newIds.map((id) => readLocalRecording(RECORDINGS_DIR, id, origin));
+      for (const r of rows) {
+        // onConflictDoNothing guards against a race with the getRecordings sweep.
+        await db
+          .insert(recordings)
+          .values({
+            id: r.recordId,
+            meetingId: r.meetingId,
+            meetingName: r.meetingName,
+            startTime: r.startTime,
+            endTime: r.endTime,
+            videoUrl: r.videoUrl,
+            status: "pending",
+          })
+          .onConflictDoNothing();
+      }
+
+      logger.info({ found: ids.length, queued: rows.length }, "folder-scan discovered recordings");
+      return rows.map((r) => ({ recordingId: r.recordId, videoUrl: r.videoUrl }));
+    });
+
+    if (newRecordings.length > 0) {
+      await step.sendEvent(
+        "dispatch-scan-process-events",
         newRecordings.map((r) => ({
           name: "bbb/ingest.process" as const,
           data: { recordingId: r.recordingId, videoUrl: r.videoUrl },

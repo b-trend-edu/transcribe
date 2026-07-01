@@ -1,6 +1,13 @@
 // src/__tests__/bbb.test.ts
 import { describe, it, expect } from "bun:test";
-import { buildChecksum, buildApiUrl, parseRecordingsXml, buildWebcamsUrl, uploadCaptionTrack } from "../lib/bbb";
+import {
+  buildChecksum,
+  buildApiUrl,
+  parseRecordingsXml,
+  buildWebcamsUrl,
+  uploadCaptionTrack,
+  parseRecordingMetadataXml,
+} from "../lib/bbb";
 
 describe("buildChecksum", () => {
   it("creates SHA-1 checksum from call name, query string, and secret", () => {
@@ -43,6 +50,50 @@ describe("buildWebcamsUrl", () => {
     expect(buildWebcamsUrl("https://bbb.example.com:8443/playback/presentation/2.3/x-1", "x-1")).toBe(
       "https://bbb.example.com:8443/presentation/x-1/video/webcams.webm"
     );
+  });
+});
+
+describe("parseRecordingMetadataXml", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<recording>
+  <id>3c97908bb2dc4f794914776d639405709479c3da-1490721543626</id>
+  <state>published</state>
+  <published>true</published>
+  <start_time>1490721543626</start_time>
+  <end_time>1490721560835</end_time>
+  <participants>1</participants>
+  <meta>
+    <meetingName>Falck Weekly</meetingName>
+    <meetingId>falck-room-01</meetingId>
+    <isBreakout>false</isBreakout>
+  </meta>
+  <playback>
+    <format>presentation</format>
+    <link>https://vroom.b-trend.digital/playback/presentation/2.3/3c97908bb2dc4f794914776d639405709479c3da-1490721543626</link>
+    <duration>9807</duration>
+  </playback>
+</recording>`;
+
+  it("extracts meeting name, ms->s timestamps, and the playback link", () => {
+    const meta = parseRecordingMetadataXml(xml);
+    expect(meta.meetingName).toBe("Falck Weekly");
+    expect(meta.meetingId).toBe("falck-room-01");
+    // start_time/end_time are epoch ms in the file; returned as seconds
+    expect(meta.startTime).toBe(1490721543);
+    expect(meta.endTime).toBe(1490721560);
+    expect(meta.playbackUrl).toBe(
+      "https://vroom.b-trend.digital/playback/presentation/2.3/3c97908bb2dc4f794914776d639405709479c3da-1490721543626"
+    );
+  });
+
+  it("returns undefined fields for empty/garbage metadata rather than throwing", () => {
+    expect(parseRecordingMetadataXml("<recording></recording>")).toEqual({
+      meetingName: undefined,
+      meetingId: undefined,
+      startTime: undefined,
+      endTime: undefined,
+      playbackUrl: undefined,
+    });
   });
 });
 

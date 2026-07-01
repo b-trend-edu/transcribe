@@ -4,14 +4,13 @@ import { logger as honoLogger } from "hono/logger";
 import { Scalar } from "@scalar/hono-api-reference";
 import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
-import { sweep, processRecording } from "./inngest/functions/ingest";
+import { sweep, scanRecordings, processRecording } from "./inngest/functions/ingest";
 import { db, recordings, transcripts } from "./lib/db";
 import pinoLogger from "./lib/logger";
 import { eq, count } from "drizzle-orm";
 
 const app = new OpenAPIHono();
 
-// --- Middleware ---
 
 app.use(honoLogger((str) => pinoLogger.info(str)));
 
@@ -362,7 +361,7 @@ app.get("/scalar", Scalar({ url: "/doc", pageTitle: "Transcribe API" }));
 
 const inngestHandler = serve({
   client: inngest,
-  functions: [sweep, processRecording],
+  functions: [sweep, scanRecordings, processRecording],
 });
 
 app.use("/api/inngest", async (c) => inngestHandler(c));

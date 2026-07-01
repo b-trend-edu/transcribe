@@ -191,3 +191,59 @@ export async function fetchRecordings(
   const xml = await response.text();
   return parseRecordingsXml(xml);
 }
+
+export interface RecordingMetadata {
+  meetingName?: string;
+  meetingId?: string;
+  startTime?: number; // epoch seconds
+  endTime?: number; // epoch seconds
+  playbackUrl?: string; // presentation playback page URL
+}
+
+function firstString(...vals: unknown[]): string | undefined {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (typeof v === "number") return String(v);
+  }
+  return undefined;
+}
+
+function firstNumber(...vals: unknown[]): number | undefined {
+  for (const v of vals) {
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+/**
+ * Parse a BBB *recording* metadata.xml (the per-recording file in the published
+ * dir, e.g. .../presentation/<id>/metadata.xml). Defensive across BBB versions:
+ * field names have varied, so we try the known aliases and fall back to
+ * undefined. Timestamps are epoch MILLISECONDS in the file and returned as epoch
+ * SECONDS (matching the recordings table).
+ */
+export function parseRecordingMetadataXml(xml: string): RecordingMetadata {
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const parsed = parser.parse(xml) as Record<string, any>;
+  const rec = (parsed?.recording ?? {}) as Record<string, any>;
+  const meta = (rec.meta ?? {}) as Record<string, any>;
+
+  const startMs = firstNumber(rec.start_time, rec.start_timestamp, rec.startTime);
+  const endMs = firstNumber(rec.end_time, rec.end_timestamp, rec.endTime);
+
+  // <playback> may be a single block or several (one per format); pick the
+  // presentation one, else the first. The playback URL is <link> (or <url>).
+  const pbRaw = rec.playback;
+  const pbList: any[] = Array.isArray(pbRaw) ? pbRaw : pbRaw ? [pbRaw] : [];
+  const pres = pbList.find((p) => firstString(p?.format) === "presentation") ?? pbList[0];
+  const playbackUrl = firstString(pres?.link, pres?.url);
+
+  return {
+    meetingName: firstString(meta.meetingName, meta.name, rec.name),
+    meetingId: firstString(meta.meetingId, rec.meetingId),
+    startTime: startMs != null ? Math.floor(startMs / 1000) : undefined,
+    endTime: endMs != null ? Math.floor(endMs / 1000) : undefined,
+    playbackUrl,
+  };
+}
