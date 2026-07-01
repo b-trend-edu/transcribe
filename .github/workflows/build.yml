@@ -13,7 +13,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }} # artzkaizen/transcribe
+  IMAGE_NAME: ${{ github.repository }} # b-trend-edu/transcribe
 
 jobs:
   build-and-push:

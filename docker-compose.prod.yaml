@@ -3,7 +3,7 @@ services:
     # Image is built & pushed by GitHub Actions (.github/workflows/build.yml);
     # Coolify pulls it — it does not build from source. Override the tag with
     # ${IMAGE_TAG} in Coolify if you want to pin a specific build.
-    image: ghcr.io/artzkaizen/transcribe:${IMAGE_TAG:-latest}
+    image: ghcr.io/b-trend-edu/transcribe:${IMAGE_TAG:-latest}
     pull_policy: always
     # torch 2.8.0 cu128 wheels are amd64-only (see Dockerfile).
     platform: linux/amd64
