@@ -1,20 +1,51 @@
 import { inngest } from "../client";
 import { db, recordings, transcripts } from "../../lib/db";
-import { fetchRecordings } from "../../lib/bbb";
+import { fetchRecordings, buildWebcamsUrl } from "../../lib/bbb";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { eq } from "drizzle-orm";
 import { mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
 
-const envSchema = z.object({
-  BBB_BASE_URL: z.string(),
-  BBB_SHARED_SECRET: z.string().min(1),
-  WHISPER_MODEL: z.enum(["tiny", "base", "small", "medium", "large"]).default("base"),
-});
+// Env booleans arrive as strings ("false" is truthy under Boolean()), so coerce
+// explicitly from the common truthy tokens.
+const envBool = z.preprocess(
+  (v) =>
+    typeof v === "string"
+      ? ["true", "1", "yes", "on"].includes(v.toLowerCase())
+      : Boolean(v),
+  z.boolean()
+);
+
+const envSchema = z
+  .object({
+    BBB_BASE_URL: z.string(),
+    BBB_SHARED_SECRET: z.string().min(1),
+    WHISPER_MODEL: z
+      .enum(["tiny", "base", "small", "medium", "large", "large-v2", "large-v3"])
+      .default("large-v3"),
+    WHISPERX_DEVICE: z.enum(["cuda", "cpu"]).default("cuda"),
+    WHISPERX_COMPUTE_TYPE: z.enum(["float16", "float32", "int8"]).default("float16"),
+    WHISPERX_BATCH_SIZE: z.coerce.number().int().positive().default(16),
+    DIARIZE: envBool.default(false),
+    HF_TOKEN: z.string().min(1).optional(),
+    MIN_SPEAKERS: z.coerce.number().int().positive().optional(),
+    MAX_SPEAKERS: z.coerce.number().int().positive().optional(),
+  })
+  .refine((e) => !e.DIARIZE || !!e.HF_TOKEN, {
+    message: "DIARIZE=true requires HF_TOKEN to be set",
+    path: ["HF_TOKEN"],
+  });
 
 function getEnv() {
-  const parsed = envSchema.safeParse(process.env);
+  // Docker/Coolify render `${VAR:-}` defaults as EMPTY STRINGS (present, not
+  // undefined). "" bypasses neither .optional() nor .positive(), so drop empty
+  // values up front and treat them as unset — otherwise HF_TOKEN/MIN_SPEAKERS/
+  // MAX_SPEAKERS="" fail validation and getEnv() throws on every job.
+  const raw = Object.fromEntries(
+    Object.entries(process.env).filter(([, v]) => v !== "")
+  );
+  const parsed = envSchema.safeParse(raw);
   if (!parsed.success) {
     throw new Error(`Missing required env vars: ${parsed.error.message}`);
   }
@@ -90,7 +121,9 @@ export const processRecording = inngest.createFunction(
   {
     id: "bbb/ingest.process",
     retries: 2,
-    concurrency: { limit: 2 },
+    // Single GPU: large-v3 + diarization needs ~10-13 GB VRAM, so serialize jobs.
+    // Raise only if the GPU has headroom for concurrent runs.
+    concurrency: { limit: 1 },
     triggers: [{ event: "bbb/ingest.process" }],
     onFailure: async ({ event, error }) => {
       const parsed = failureEventSchema.safeParse(event);
@@ -118,15 +151,35 @@ export const processRecording = inngest.createFunction(
         .where(eq(recordings.id, recordingId));
 
       mkdirSync(TEMP_DIR, { recursive: true });
-      const outputPath = join(TEMP_DIR, `${recordingId}.mp4`);
 
-      const response = await fetch(videoUrl);
-      if (!response.ok) {
-        throw new Error(`Download failed: ${response.status}`);
+      // `videoUrl` is the HTML playback PAGE, not media. The real audio lives at
+      // <origin>/presentation/<id>/video/webcams.{webm,mp4}. Try webm then mp4,
+      // and reject HTML responses (a 200 player/error page) so we never hand
+      // ffmpeg a web page.
+      const candidates: Array<["webm" | "mp4", string]> = [
+        ["webm", buildWebcamsUrl(videoUrl, recordingId, "webm")],
+        ["mp4", buildWebcamsUrl(videoUrl, recordingId, "mp4")],
+      ];
+
+      let lastStatus = 0;
+      for (const [ext, mediaUrl] of candidates) {
+        const response = await fetch(mediaUrl);
+        if (!response.ok) {
+          lastStatus = response.status;
+          continue;
+        }
+        if ((response.headers.get("content-type") ?? "").includes("text/html")) {
+          lastStatus = 415; // got a page, not media
+          continue;
+        }
+        const outputPath = join(TEMP_DIR, `${recordingId}.${ext}`);
+        await Bun.write(outputPath, response);
+        return outputPath;
       }
 
-      await Bun.write(outputPath, response);
-      return outputPath;
+      throw new Error(
+        `Could not download recording media for ${recordingId} (last status ${lastStatus})`
+      );
     });
 
     const result = await step.run(`transcribe-${recordingId}`, async () => {
@@ -134,7 +187,17 @@ export const processRecording = inngest.createFunction(
         .set({ status: "transcribing", updatedAt: Math.floor(Date.now() / 1000) })
         .where(eq(recordings.id, recordingId));
 
-      return await transcribe(audioPath, getEnv().WHISPER_MODEL);
+      const e = getEnv();
+      return await transcribe(audioPath, {
+        model: e.WHISPER_MODEL,
+        device: e.WHISPERX_DEVICE,
+        computeType: e.WHISPERX_COMPUTE_TYPE,
+        batchSize: e.WHISPERX_BATCH_SIZE,
+        diarize: e.DIARIZE,
+        hfToken: e.HF_TOKEN,
+        minSpeakers: e.MIN_SPEAKERS,
+        maxSpeakers: e.MAX_SPEAKERS,
+      });
     });
 
     await step.run(`store-${recordingId}`, async () => {
@@ -145,6 +208,7 @@ export const processRecording = inngest.createFunction(
           text: result.text,
           vtt: result.vtt,
           language: result.language,
+          durationSeconds: result.durationSeconds,
           model: WHISPER_MODEL,
         })
         .onConflictDoUpdate({
@@ -153,6 +217,7 @@ export const processRecording = inngest.createFunction(
             text: result.text,
             vtt: result.vtt,
             language: result.language,
+            durationSeconds: result.durationSeconds,
             model: WHISPER_MODEL,
             createdAt: Math.floor(Date.now() / 1000),
           },

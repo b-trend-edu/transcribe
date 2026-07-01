@@ -1,6 +1,6 @@
 // src/__tests__/bbb.test.ts
 import { describe, it, expect } from "bun:test";
-import { buildChecksum, buildApiUrl, parseRecordingsXml } from "../lib/bbb";
+import { buildChecksum, buildApiUrl, parseRecordingsXml, buildWebcamsUrl } from "../lib/bbb";
 
 describe("buildChecksum", () => {
   it("creates SHA-1 checksum from call name, query string, and secret", () => {
@@ -20,6 +20,28 @@ describe("buildApiUrl", () => {
     );
     expect(url).toStartWith(
       "https://vroom.b-trend.digital/bigbluebutton/api/getRecordings?state=published&checksum="
+    );
+  });
+});
+
+describe("buildWebcamsUrl", () => {
+  const playback = "https://vroom.b-trend.digital/playback/presentation/2.3/rec-abc123";
+
+  it("maps a playback page URL to the webcams media on the same origin", () => {
+    expect(buildWebcamsUrl(playback, "rec-abc123")).toBe(
+      "https://vroom.b-trend.digital/presentation/rec-abc123/video/webcams.webm"
+    );
+  });
+
+  it("supports the mp4 fallback extension", () => {
+    expect(buildWebcamsUrl(playback, "rec-abc123", "mp4")).toBe(
+      "https://vroom.b-trend.digital/presentation/rec-abc123/video/webcams.mp4"
+    );
+  });
+
+  it("ignores the playback path/port-less origin details and keeps only scheme+host", () => {
+    expect(buildWebcamsUrl("https://bbb.example.com:8443/playback/presentation/2.3/x-1", "x-1")).toBe(
+      "https://bbb.example.com:8443/presentation/x-1/video/webcams.webm"
     );
   });
 });
