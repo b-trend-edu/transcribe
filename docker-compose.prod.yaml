@@ -20,6 +20,9 @@ services:
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
       # Push the finished VTT back to the BBB recording as a caption track.
       - PUBLISH_CAPTIONS=${PUBLISH_CAPTIONS:-true}
+      # Read recording media from the mounted BBB dir (see volumes) instead of
+      # downloading over HTTP. Must match the container-side mount path below.
+      - RECORDINGS_DIR=${RECORDINGS_DIR:-/recordings}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
       - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
       # ---- WhisperX (GPU + speaker diarization) ----
@@ -39,6 +42,10 @@ services:
     volumes:
       # persist whisper / align / pyannote weights across restarts & redeploys
       - whisperx_models:/models
+      # Read recording media directly from the BBB host (same box), read-only.
+      # Adjust the host path if your BBB stores recordings elsewhere. Captions are
+      # still written back via the putRecordingTextTrack API, not this mount.
+      - /var/bigbluebutton/presentation:/recordings:ro
     depends_on:
       inngest:
         condition: service_healthy

@@ -2,9 +2,10 @@ import { inngest } from "../client";
 import { db, recordings, transcripts } from "../../lib/db";
 import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
+import { resolveLocalMedia } from "../../lib/media";
 import logger from "../../lib/logger";
 import { eq } from "drizzle-orm";
-import { mkdirSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync, symlinkSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
 
@@ -37,6 +38,10 @@ const envSchema = z
     // Force the spoken language (e.g. "de") instead of auto-detecting. Recommended
     // for single-language deployments — auto-detect can mislabel short/quiet audio.
     WHISPER_LANGUAGE: z.string().min(2).optional(),
+    // Mounted BBB recordings dir (e.g. /recordings -> /var/bigbluebutton/presentation).
+    // When the media is found locally under it, transcribe it directly instead of
+    // downloading over HTTP. Leave unset to always download.
+    RECORDINGS_DIR: z.string().min(1).optional(),
     WHISPERX_DEVICE: z.enum(["cuda", "cpu"]).default("cuda"),
     WHISPERX_COMPUTE_TYPE: z.enum(["float16", "float32", "int8"]).default("float16"),
     WHISPERX_BATCH_SIZE: z.coerce.number().int().positive().default(16),
@@ -166,6 +171,23 @@ export const processRecording = inngest.createFunction(
         .where(eq(recordings.id, recordingId));
 
       mkdirSync(TEMP_DIR, { recursive: true });
+
+      // Prefer locally-mounted recording media (service running on the BBB host)
+      // to skip the HTTP download. Symlink it into TEMP_DIR so the VTT filename
+      // stays unique per recording and cleanup only removes the link — never the
+      // source recording under the read-only mount.
+      const localMedia = resolveLocalMedia(getEnv().RECORDINGS_DIR, recordingId);
+      if (localMedia) {
+        const ext = localMedia.endsWith(".mp4") ? "mp4" : "webm";
+        const linkPath = join(TEMP_DIR, `${recordingId}.${ext}`);
+        try {
+          unlinkSync(linkPath);
+        } catch {
+          // no stale link to clear
+        }
+        symlinkSync(localMedia, linkPath);
+        return linkPath;
+      }
 
       // `videoUrl` is the HTML playback PAGE, not media. The real audio lives at
       // <origin>/presentation/<id>/video/webcams.{webm,mp4}. Try webm then mp4,
