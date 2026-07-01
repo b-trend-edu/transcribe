@@ -128,6 +128,54 @@ export function parseRecordingsXml(xml: string): BbbRecording[] {
     .filter((r): r is BbbRecording => r !== null);
 }
 
+export interface CaptionUploadResult {
+  success: boolean;
+  messageKey?: string;
+  message?: string;
+}
+
+/**
+ * Upload a WebVTT caption track to a published recording via BBB's async
+ * `putRecordingTextTrack` API. BBB writes `caption_<lang>.vtt` and a
+ * `captions.json` entry into the recording's presentation dir once its caption
+ * worker processes the upload (can take a few minutes). Re-uploading the same
+ * `kind`+`lang` replaces the existing track.
+ *
+ * The checksum covers the query string only (not the file body), so we build the
+ * query string once and reuse it verbatim for both the checksum and the URL. The
+ * VTT is sent as a `multipart/form-data` part named `file` with `text/vtt`.
+ */
+export async function uploadCaptionTrack(
+  baseUrl: string,
+  secret: string,
+  recordId: string,
+  lang: string,
+  label: string,
+  vtt: string,
+  kind: "captions" | "subtitles" = "captions"
+): Promise<CaptionUploadResult> {
+  const queryString = new URLSearchParams({
+    recordID: recordId,
+    kind,
+    lang,
+    label,
+  }).toString();
+  const url = buildApiUrl(baseUrl, "putRecordingTextTrack", queryString, secret);
+
+  const form = new FormData();
+  form.append("file", new Blob([vtt], { type: "text/vtt" }), `caption_${lang}.vtt`);
+
+  const response = await fetch(url, { method: "POST", body: form });
+  const xml = await response.text();
+
+  const returncode = xml.match(/<returncode>(.*?)<\/returncode>/)?.[1];
+  return {
+    success: response.ok && returncode === "SUCCESS",
+    messageKey: xml.match(/<messageKey>(.*?)<\/messageKey>/)?.[1],
+    message: xml.match(/<message>(.*?)<\/message>/)?.[1],
+  };
+}
+
 export async function fetchRecordings(
   baseUrl: string,
   secret: string

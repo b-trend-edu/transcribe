@@ -1,11 +1,21 @@
 import { inngest } from "../client";
 import { db, recordings, transcripts } from "../../lib/db";
-import { fetchRecordings, buildWebcamsUrl } from "../../lib/bbb";
+import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
+import logger from "../../lib/logger";
 import { eq } from "drizzle-orm";
 import { mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
+
+/** Human label for a language code, e.g. "en" -> "English"; falls back to the code. */
+function languageLabel(lang: string): string {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(lang) ?? lang;
+  } catch {
+    return lang;
+  }
+}
 
 // Env booleans arrive as strings ("false" is truthy under Boolean()), so coerce
 // explicitly from the common truthy tokens.
@@ -24,6 +34,9 @@ const envSchema = z
     WHISPER_MODEL: z
       .enum(["tiny", "base", "small", "medium", "large", "large-v2", "large-v3"])
       .default("large-v3"),
+    // Force the spoken language (e.g. "de") instead of auto-detecting. Recommended
+    // for single-language deployments — auto-detect can mislabel short/quiet audio.
+    WHISPER_LANGUAGE: z.string().min(2).optional(),
     WHISPERX_DEVICE: z.enum(["cuda", "cpu"]).default("cuda"),
     WHISPERX_COMPUTE_TYPE: z.enum(["float16", "float32", "int8"]).default("float16"),
     WHISPERX_BATCH_SIZE: z.coerce.number().int().positive().default(16),
@@ -31,6 +44,8 @@ const envSchema = z
     HF_TOKEN: z.string().min(1).optional(),
     MIN_SPEAKERS: z.coerce.number().int().positive().optional(),
     MAX_SPEAKERS: z.coerce.number().int().positive().optional(),
+    // Push the finished VTT back to the BBB recording as a caption track.
+    PUBLISH_CAPTIONS: envBool.default(true),
   })
   .refine((e) => !e.DIARIZE || !!e.HF_TOKEN, {
     message: "DIARIZE=true requires HF_TOKEN to be set",
@@ -197,6 +212,7 @@ export const processRecording = inngest.createFunction(
         hfToken: e.HF_TOKEN,
         minSpeakers: e.MIN_SPEAKERS,
         maxSpeakers: e.MAX_SPEAKERS,
+        language: e.WHISPER_LANGUAGE,
       });
     });
 
@@ -231,6 +247,40 @@ export const processRecording = inngest.createFunction(
         unlinkSync(audioPath);
       } catch {
         // ignore cleanup errors
+      }
+    });
+
+    // Best-effort: push the VTT back to the BBB recording as a caption track
+    // (async on BBB's side). The transcript is already saved, so a failure here
+    // must NOT fail the job or flip the recording back to "failed".
+    await step.run(`publish-captions-${recordingId}`, async () => {
+      const e = getEnv();
+      const lang = e.WHISPER_LANGUAGE ?? result.language;
+
+      if (!e.PUBLISH_CAPTIONS) return { skipped: "disabled" };
+      if (!lang || lang === "unknown" || !result.vtt.trim()) {
+        return { skipped: "no language or empty vtt" };
+      }
+
+      try {
+        const res = await uploadCaptionTrack(
+          e.BBB_BASE_URL,
+          e.BBB_SHARED_SECRET,
+          recordingId,
+          lang,
+          languageLabel(lang),
+          result.vtt
+        );
+        if (!res.success) {
+          logger.warn(
+            { recordingId, lang, messageKey: res.messageKey },
+            "caption upload rejected by BBB"
+          );
+        }
+        return res;
+      } catch (err) {
+        logger.warn({ recordingId, lang, err }, "caption upload failed");
+        return { success: false };
       }
     });
 

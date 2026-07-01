@@ -16,6 +16,10 @@ services:
       - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
       - INNGEST_BASE_URL=http://inngest:8288
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
+      # Force the spoken language (e.g. de); leave blank to auto-detect per recording.
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-}
+      # Push the finished VTT back to the BBB recording as a caption track.
+      - PUBLISH_CAPTIONS=${PUBLISH_CAPTIONS:-true}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
       - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
       # ---- WhisperX (GPU + speaker diarization) ----

@@ -1,6 +1,6 @@
 // src/__tests__/bbb.test.ts
 import { describe, it, expect } from "bun:test";
-import { buildChecksum, buildApiUrl, parseRecordingsXml, buildWebcamsUrl } from "../lib/bbb";
+import { buildChecksum, buildApiUrl, parseRecordingsXml, buildWebcamsUrl, uploadCaptionTrack } from "../lib/bbb";
 
 describe("buildChecksum", () => {
   it("creates SHA-1 checksum from call name, query string, and secret", () => {
@@ -43,6 +43,61 @@ describe("buildWebcamsUrl", () => {
     expect(buildWebcamsUrl("https://bbb.example.com:8443/playback/presentation/2.3/x-1", "x-1")).toBe(
       "https://bbb.example.com:8443/presentation/x-1/video/webcams.webm"
     );
+  });
+});
+
+describe("uploadCaptionTrack", () => {
+  it("POSTs the VTT to putRecordingTextTrack with a checksum and file part", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(
+        "<response><returncode>SUCCESS</returncode><messageKey>upload_text_track_success</messageKey></response>"
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      const res = await uploadCaptionTrack(
+        "https://vroom.b-trend.digital/bigbluebutton",
+        "my-secret",
+        "rec-abc123",
+        "de",
+        "German",
+        "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhallo\n"
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.messageKey).toBe("upload_text_track_success");
+      expect(calls).toHaveLength(1);
+
+      const { url, init } = calls[0];
+      expect(url).toContain("/api/putRecordingTextTrack?");
+      expect(url).toContain("recordID=rec-abc123");
+      expect(url).toContain("kind=captions");
+      expect(url).toContain("lang=de");
+      expect(url).toContain("checksum=");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).has("file")).toBe(true);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("reports failure when BBB returns FAILED", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        "<response><returncode>FAILED</returncode><messageKey>invalidLang</messageKey></response>"
+      )) as unknown as typeof fetch;
+    try {
+      const res = await uploadCaptionTrack("https://x/bigbluebutton", "s", "r", "en", "English", "WEBVTT\n");
+      expect(res.success).toBe(false);
+      expect(res.messageKey).toBe("invalidLang");
+    } finally {
+      globalThis.fetch = orig;
+    }
   });
 });
 
