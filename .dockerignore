@@ -6,3 +6,7 @@ data/
 .github/
 docs/
 *.md
+# Deployment-only files — never used at runtime, so keep them out of the image
+# so editing them doesn't invalidate the COPY layer / trigger a needless rebuild.
+docker-compose*.yaml
+docker-compose*.yml

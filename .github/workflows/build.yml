@@ -1,14 +1,21 @@
 name: build
 
 # Build the WhisperX GPU image and push it to GHCR. Coolify pulls the published
-# image (ghcr.io/artzkaizen/transcribe) — it does not build from source.
+# image (ghcr.io/b-trend-edu/transcribe) — it does not build from source.
 on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Skip rebuilds for changes that don't affect the image. Deployment/config
+    # files (compose, docs) are not baked in, so editing them shouldn't spend a
+    # ~5 min GPU-image build. Note: path filters also apply to tag pushes — if a
+    # release tag ever lands on a docs/compose-only commit, trigger the build
+    # manually via workflow_dispatch.
     paths-ignore:
       - "**.md"
       - "docs/**"
+      - "docker-compose*.yaml"
+      - "docker-compose*.yml"
   workflow_dispatch:
 
 env:
