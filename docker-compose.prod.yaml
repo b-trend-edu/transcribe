@@ -7,6 +7,14 @@ services:
     pull_policy: always
     # torch 2.8.0 cu128 wheels are amd64-only (see Dockerfile).
     platform: linux/amd64
+    # GPU access. The host has the nvidia runtime registered but NOT as the
+    # default runtime, so the container must ask for it explicitly — this is the
+    # equivalent of `docker run --gpus all`. The `deploy.reservations.devices`
+    # block below is the compose-native way, but Coolify/plain `docker compose`
+    # often ignore `deploy.resources`, which is why the app booted without a GPU
+    # (CUDA error 803). `runtime: nvidia` + NVIDIA_VISIBLE_DEVICES is honored in
+    # all cases. Requires the nvidia-container-runtime on the host.
+    runtime: nvidia
     ports:
       # Publish the app ONLY on the host's Tailscale IP, so it is reachable over
       # the tailnet (http://<tailnet-ip>:3000 or http://<magicdns-name>:3000) but
@@ -30,6 +38,11 @@ services:
       - RECORDINGS_DIR=${RECORDINGS_DIR:-/recordings}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
       - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
+      # ---- GPU visibility (paired with `runtime: nvidia` above) ----
+      # The nvidia/cuda base image sets sensible defaults, but pin them explicitly
+      # so the app container always sees all GPUs with compute+utility caps.
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # ---- WhisperX (GPU + speaker diarization) ----
       - WHISPERX_DEVICE=${WHISPERX_DEVICE:-cuda}
       - WHISPERX_COMPUTE_TYPE=${WHISPERX_COMPUTE_TYPE:-float16}
@@ -63,7 +76,9 @@ services:
           memory: 16g     # host RAM; VRAM is the real ceiling (large-v3 + diarization ~10-13 GB)
         reservations:
           memory: 2g
-          # ---- GPU access (NVIDIA Container Toolkit required on the host) ----
+          # Redundant belt-and-suspenders for engines that DO honor deploy.devices
+          # (e.g. plain `docker compose up`). The real GPU handoff is `runtime:
+          # nvidia` + NVIDIA_VISIBLE_DEVICES above, since Coolify ignores this block.
           devices:
             - driver: nvidia
               count: all           # or `count: 1` / `device_ids: ["0"]` (count & device_ids are mutually exclusive)
