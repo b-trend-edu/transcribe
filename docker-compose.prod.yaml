@@ -83,7 +83,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8288/health"]
+      # The inngest/inngest image ships no curl/wget/nc — only bash. Probe /health
+      # via bash's /dev/tcp (dash, the default sh, does not support /dev/tcp).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8288 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
       interval: 30s
       timeout: 10s
       retries: 3
