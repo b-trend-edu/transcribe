@@ -37,6 +37,8 @@ services:
       # downloading over HTTP. Must match the container-side mount path below.
       - RECORDINGS_DIR=${RECORDINGS_DIR:-/recordings}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
+      # Max simultaneous transcriptions. Keep at 1 for a single GPU.
+      - TRANSCRIBE_CONCURRENCY=${TRANSCRIBE_CONCURRENCY:-1}
       - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
       # ---- GPU visibility (paired with `runtime: nvidia` above) ----
       # The nvidia/cuda base image sets sensible defaults, but pin them explicitly

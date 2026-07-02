@@ -1,11 +1,12 @@
 import { inngest } from "../client";
+import { NonRetriableError } from "inngest";
 import { db, recordings, transcripts } from "../../lib/db";
 import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
 import logger from "../../lib/logger";
 import { and, eq, lt, ne } from "drizzle-orm";
-import { mkdirSync, unlinkSync, symlinkSync } from "fs";
+import { existsSync, mkdirSync, statSync, unlinkSync, symlinkSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
 
@@ -107,6 +108,16 @@ const DISPATCH_CHUNK = 100;
 // keyed on recording id, so re-poking a row that is merely queued behind the
 // single-GPU limit is a no-op.
 const STALE_PENDING_SECONDS = 6 * 60 * 60;
+
+// Max transcription jobs to run at once (Inngest concurrency cap on
+// processRecording). Default 1: on a single GPU, large-v3 + diarization needs
+// ~10-13 GB VRAM, so jobs must serialize. Raise via TRANSCRIBE_CONCURRENCY only
+// if the GPU has headroom for parallel runs. Read at module load (registration
+// time), so process.env directly rather than the per-job getEnv().
+const TRANSCRIBE_CONCURRENCY = Math.max(
+  1,
+  Math.trunc(Number(process.env.TRANSCRIBE_CONCURRENCY)) || 1
+);
 
 // --- Function 1: Sweep BBB for new recordings (cron) ---
 
@@ -302,9 +313,9 @@ export const processRecording = inngest.createFunction(
   {
     id: "bbb/ingest.process",
     retries: 2,
-    // Single GPU: large-v3 + diarization needs ~10-13 GB VRAM, so serialize jobs.
-    // Raise only if the GPU has headroom for concurrent runs.
-    concurrency: { limit: 1 },
+    // Cap simultaneous transcriptions. Default 1 (single GPU: large-v3 +
+    // diarization needs ~10-13 GB VRAM); tune with TRANSCRIBE_CONCURRENCY.
+    concurrency: { limit: TRANSCRIBE_CONCURRENCY },
     // A recording can be dispatched more than once (the sweep and folder-scan
     // crons overlap, and the stale-'pending' requeue re-pokes stranded rows), so
     // dedupe by recording id: while a run for this id is queued or running, any
@@ -374,6 +385,14 @@ export const processRecording = inngest.createFunction(
         return linkPath;
       }
 
+      // Idempotent: if a previous attempt already downloaded this media (a
+      // function retry, or the step re-running before its result was memoized),
+      // reuse it instead of re-fetching the whole video over HTTP.
+      for (const ext of ["webm", "mp4"] as const) {
+        const existing = join(TEMP_DIR, `${recordingId}.${ext}`);
+        if (existsSync(existing) && statSync(existing).size > 0) return existing;
+      }
+
       // `videoUrl` is the HTML playback PAGE, not media. The real audio lives at
       // <origin>/presentation/<id>/video/webcams.{webm,mp4}. Try webm then mp4,
       // and reject HTML responses (a 200 player/error page) so we never hand
@@ -410,17 +429,33 @@ export const processRecording = inngest.createFunction(
         .where(eq(recordings.id, recordingId));
 
       const e = getEnv();
-      return await transcribe(audioPath, {
-        model: e.WHISPER_MODEL,
-        device: e.WHISPERX_DEVICE,
-        computeType: e.WHISPERX_COMPUTE_TYPE,
-        batchSize: e.WHISPERX_BATCH_SIZE,
-        diarize: e.DIARIZE,
-        hfToken: e.HF_TOKEN,
-        minSpeakers: e.MIN_SPEAKERS,
-        maxSpeakers: e.MAX_SPEAKERS,
-        language: e.WHISPER_LANGUAGE,
-      });
+      try {
+        return await transcribe(audioPath, {
+          model: e.WHISPER_MODEL,
+          device: e.WHISPERX_DEVICE,
+          computeType: e.WHISPERX_COMPUTE_TYPE,
+          batchSize: e.WHISPERX_BATCH_SIZE,
+          diarize: e.DIARIZE,
+          hfToken: e.HF_TOKEN,
+          minSpeakers: e.MIN_SPEAKERS,
+          maxSpeakers: e.MAX_SPEAKERS,
+          language: e.WHISPER_LANGUAGE,
+        });
+      } catch (err) {
+        // A GPU/driver failure (e.g. CUDA error 803) is environmental, not
+        // specific to this recording — every retry re-runs the whole pipeline
+        // (re-download + re-transcribe) and fails the same way, wasting minutes
+        // per recording. Fail fast so the host gets fixed instead of thrashing.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          /\bcuda\b|cudnn|cublas|unsupported display driver|no CUDA-capable device|out of memory|nvidia/i.test(
+            msg
+          )
+        ) {
+          throw new NonRetriableError(`GPU unavailable, not retrying: ${msg}`);
+        }
+        throw err;
+      }
     });
 
     await step.run(`store-${recordingId}`, async () => {
