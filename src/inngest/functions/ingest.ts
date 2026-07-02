@@ -4,7 +4,7 @@ import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
 import logger from "../../lib/logger";
-import { eq } from "drizzle-orm";
+import { and, eq, lt, ne } from "drizzle-orm";
 import { mkdirSync, unlinkSync, symlinkSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
@@ -79,11 +79,34 @@ const processEventSchema = z.object({
   }),
 });
 
+// Inngest delivers the internal `inngest/function.failed` payload to onFailure;
+// the original `bbb/ingest.process` event (carrying recordingId) is nested under
+// `data.event`, not at the top level.
 const failureEventSchema = z.object({
   data: z.object({
-    recordingId: z.string(),
+    event: z.object({
+      data: z.object({
+        recordingId: z.string(),
+      }),
+    }),
   }),
 });
+
+// Cap how many recordings a single cron run discovers/dispatches. A first run
+// against a host with a large backlog would otherwise build one huge
+// step.sendEvent that exceeds Inngest's per-request limit (max 5000 events /
+// ~256KiB body) and fail the whole send; the remainder drains over later runs.
+const DISCOVERY_BATCH = 200;
+// Chunk a run's dispatch so even the capped batch stays well under the per-send
+// limit and each chunk is its own retryable step.
+const DISPATCH_CHUNK = 100;
+// Re-dispatch recordings left in 'pending' longer than this. Guards the narrow
+// window where a run inserts the row then crashes before sending the process
+// event: without a requeue those rows strand forever (every cron dedups on
+// presence-in-table, not status). Safe because processRecording is a singleton
+// keyed on recording id, so re-poking a row that is merely queued behind the
+// single-GPU limit is a no-op.
+const STALE_PENDING_SECONDS = 6 * 60 * 60;
 
 // --- Function 1: Sweep BBB for new recordings (cron) ---
 
@@ -101,30 +124,55 @@ export const sweep = inngest.createFunction(
       const existing = await db.select({ id: recordings.id }).from(recordings);
       const existingIds = new Set(existing.map((r) => r.id));
 
-      const newOnes = bbbRecordings.filter((r) => !existingIds.has(r.recordId));
+      let newOnes = bbbRecordings.filter((r) => !existingIds.has(r.recordId));
+      if (newOnes.length === 0) return [];
 
-      for (const rec of newOnes) {
-        await db.insert(recordings).values({
-          id: rec.recordId,
-          meetingId: rec.meetingId,
-          meetingName: rec.meetingName,
-          startTime: rec.startTime,
-          endTime: rec.endTime,
-          videoUrl: rec.videoUrl,
-          status: "pending",
-        });
-      }
+      // Oldest-first selection, capped per run: a first sweep against an
+      // established server can return a large backlog, so keep this run's dispatch
+      // under Inngest's send limit and let later sweeps drain the rest.
+      newOnes = [...newOnes]
+        .sort((a, b) => a.startTime - b.startTime)
+        .slice(0, DISCOVERY_BATCH);
 
-      return newOnes.map((r) => ({
-        recordingId: r.recordId,
-        videoUrl: r.videoUrl,
-      }));
+      // Then insert in a stable recordId order (matching the folder scan) so the
+      // two concurrent cron transactions acquire row locks on any shared ids in
+      // the same order — no deadlock.
+      newOnes.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
+
+      // Insert idempotently inside a transaction and dispatch ONLY rows this run
+      // actually inserted. onConflictDoNothing().returning() yields a row only on
+      // a real insert, so a race with the folder scan can neither throw a
+      // duplicate-key error nor double-dispatch; the transaction makes a mid-loop
+      // failure all-or-nothing instead of stranding half-inserted 'pending' rows.
+      return await db.transaction(async (tx) => {
+        const claimed: Array<{ recordingId: string; videoUrl: string }> = [];
+        for (const rec of newOnes) {
+          const [row] = await tx
+            .insert(recordings)
+            .values({
+              id: rec.recordId,
+              meetingId: rec.meetingId,
+              meetingName: rec.meetingName,
+              startTime: rec.startTime,
+              endTime: rec.endTime,
+              videoUrl: rec.videoUrl,
+              status: "pending",
+            })
+            .onConflictDoNothing()
+            .returning({ id: recordings.id });
+          if (row) {
+            claimed.push({ recordingId: rec.recordId, videoUrl: rec.videoUrl });
+          }
+        }
+        return claimed;
+      });
     });
 
-    if (newRecordings.length > 0) {
+    for (let i = 0; i < newRecordings.length; i += DISPATCH_CHUNK) {
+      const slice = newRecordings.slice(i, i + DISPATCH_CHUNK);
       await step.sendEvent(
-        "dispatch-process-events",
-        newRecordings.map((r) => ({
+        `dispatch-process-events-${i}`,
+        slice.map((r) => ({
           name: "bbb/ingest.process" as const,
           data: { recordingId: r.recordingId, videoUrl: r.videoUrl },
         }))
@@ -137,14 +185,16 @@ export const sweep = inngest.createFunction(
 
 // --- Function 1b: Scan the mounted recordings dir for new recordings (cron) ---
 // Discovers recordings straight off disk (no BBB API / no 4h wait) when the
-// service runs on the BBB host with the recordings dir mounted. Idempotent: keyed
-// by record id, so recordings already in the table are skipped. Coexists with the
-// getRecordings sweep — both dedup on the same id, so nothing is processed twice.
+// service runs on the BBB host with the recordings dir mounted. Only rows this
+// run actually inserts (onConflictDoNothing + RETURNING) are dispatched, so it
+// can race the getRecordings sweep without double-processing. Also re-queues
+// recordings stranded in 'pending' by a crash between insert and dispatch, so
+// nothing is silently lost.
 
 export const scanRecordings = inngest.createFunction(
   { id: "bbb/ingest.scan", triggers: [{ cron: "0 * * * *" }] },
   async ({ step }) => {
-    const newRecordings = await step.run("scan-local-recordings", async () => {
+    const discovered = await step.run("scan-local-recordings", async () => {
       const { RECORDINGS_DIR, BBB_BASE_URL } = getEnv();
       if (!RECORDINGS_DIR) return [];
 
@@ -153,43 +203,96 @@ export const scanRecordings = inngest.createFunction(
 
       const existing = await db.select({ id: recordings.id }).from(recordings);
       const existingIds = new Set(existing.map((r) => r.id));
-      const newIds = ids.filter((id) => !existingIds.has(id));
+      let newIds = ids.filter((id) => !existingIds.has(id));
       if (newIds.length === 0) return [];
+
+      // Oldest-first selection (a record id ends in `-<startMs>`), capped per run
+      // so a first scan of a host with thousands of published recordings can't
+      // build a send over Inngest's per-request limit; the hourly cron drains the
+      // rest.
+      newIds.sort(
+        (a, b) => (Number(a.split("-").pop()) || 0) - (Number(b.split("-").pop()) || 0)
+      );
+      const backlog = newIds.length;
+      newIds = newIds.slice(0, DISCOVERY_BATCH);
 
       const origin = new URL(BBB_BASE_URL).origin;
 
-      const rows = newIds.map((id) => readLocalRecording(RECORDINGS_DIR, id, origin));
-      for (const r of rows) {
-        // onConflictDoNothing guards against a race with the getRecordings sweep.
-        await db
-          .insert(recordings)
-          .values({
-            id: r.recordId,
-            meetingId: r.meetingId,
-            meetingName: r.meetingName,
-            startTime: r.startTime,
-            endTime: r.endTime,
-            videoUrl: r.videoUrl,
-            status: "pending",
-          })
-          .onConflictDoNothing();
-      }
+      // Read metadata BEFORE opening the transaction (keeps it short — no file I/O
+      // while holding row locks) and insert in a stable recordId order so a
+      // concurrent sweep transaction locks any shared rows in the same order — no
+      // deadlock. Only rows actually inserted (RETURNING) are dispatched, and the
+      // transaction makes a mid-loop failure all-or-nothing so a partial commit
+      // can't strand rows in 'pending' with no process event.
+      const toInsert = newIds
+        .map((id) => readLocalRecording(RECORDINGS_DIR, id, origin))
+        .sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
 
-      logger.info({ found: ids.length, queued: rows.length }, "folder-scan discovered recordings");
-      return rows.map((r) => ({ recordingId: r.recordId, videoUrl: r.videoUrl }));
+      const claimed = await db.transaction(async (tx) => {
+        const rows: Array<{ recordingId: string; videoUrl: string }> = [];
+        for (const r of toInsert) {
+          const [inserted] = await tx
+            .insert(recordings)
+            .values({
+              id: r.recordId,
+              meetingId: r.meetingId,
+              meetingName: r.meetingName,
+              startTime: r.startTime,
+              endTime: r.endTime,
+              videoUrl: r.videoUrl,
+              status: "pending",
+            })
+            .onConflictDoNothing()
+            .returning({ id: recordings.id });
+          if (inserted) rows.push({ recordingId: r.recordId, videoUrl: r.videoUrl });
+        }
+        return rows;
+      });
+
+      logger.info(
+        { found: ids.length, backlog, inserted: claimed.length },
+        "folder-scan discovered recordings"
+      );
+      return claimed;
     });
 
-    if (newRecordings.length > 0) {
+    // Self-heal: re-dispatch recordings left in 'pending' well past insert time —
+    // e.g. a crash between the DB commit above and the send below, which would
+    // otherwise strand them forever (every cron dedups on presence, not status).
+    // Runs even when RECORDINGS_DIR is unset so sweep-inserted rows heal too, and
+    // is safe because processRecording is a singleton keyed on recording id: a row
+    // merely queued behind the single-GPU limit is skipped, not re-processed.
+    const stalePending = await step.run("requeue-stale-pending", async () => {
+      const cutoff = Math.floor(Date.now() / 1000) - STALE_PENDING_SECONDS;
+      const rows = await db
+        .select({ id: recordings.id, videoUrl: recordings.videoUrl })
+        .from(recordings)
+        .where(and(eq(recordings.status, "pending"), lt(recordings.updatedAt, cutoff)))
+        .limit(DISCOVERY_BATCH);
+      return rows.map((r) => ({ recordingId: r.id, videoUrl: r.videoUrl }));
+    });
+
+    // Dispatch fresh discoveries + stranded rows (deduped by id, since a freshly
+    // inserted row is never also stale), chunked to stay under the send limit.
+    const seen = new Set<string>();
+    const toDispatch = [...discovered, ...stalePending].filter((r) => {
+      if (seen.has(r.recordingId)) return false;
+      seen.add(r.recordingId);
+      return true;
+    });
+
+    for (let i = 0; i < toDispatch.length; i += DISPATCH_CHUNK) {
+      const slice = toDispatch.slice(i, i + DISPATCH_CHUNK);
       await step.sendEvent(
-        "dispatch-scan-process-events",
-        newRecordings.map((r) => ({
+        `dispatch-scan-process-events-${i}`,
+        slice.map((r) => ({
           name: "bbb/ingest.process" as const,
           data: { recordingId: r.recordingId, videoUrl: r.videoUrl },
         }))
       );
     }
 
-    return { newRecordings: newRecordings.length };
+    return { discovered: discovered.length, requeued: stalePending.length };
   }
 );
 
@@ -202,18 +305,26 @@ export const processRecording = inngest.createFunction(
     // Single GPU: large-v3 + diarization needs ~10-13 GB VRAM, so serialize jobs.
     // Raise only if the GPU has headroom for concurrent runs.
     concurrency: { limit: 1 },
+    // A recording can be dispatched more than once (the sweep and folder-scan
+    // crons overlap, and the stale-'pending' requeue re-pokes stranded rows), so
+    // dedupe by recording id: while a run for this id is queued or running, any
+    // duplicate event is skipped. Recordings that already completed are guarded
+    // separately in the handler (singleton only covers in-flight duplicates).
+    singleton: { mode: "skip", key: "event.data.recordingId" },
     triggers: [{ event: "bbb/ingest.process" }],
     onFailure: async ({ event, error }) => {
       const parsed = failureEventSchema.safeParse(event);
       if (!parsed.success) return;
-      const { recordingId } = parsed.data.data;
+      const { recordingId } = parsed.data.data.event.data;
+      // Never clobber a recording that already completed — a late failure of a
+      // duplicate/re-dispatched run must not flip a good transcript to 'failed'.
       await db.update(recordings)
         .set({
           status: "failed",
           error: error.message,
           updatedAt: Math.floor(Date.now() / 1000),
         })
-        .where(eq(recordings.id, recordingId));
+        .where(and(eq(recordings.id, recordingId), ne(recordings.status, "completed")));
     },
   },
   async ({ event, step }) => {
@@ -222,6 +333,22 @@ export const processRecording = inngest.createFunction(
       throw new Error(`Invalid event data: ${parsed.error.message}`);
     }
     const { recordingId, videoUrl } = parsed.data.data;
+
+    // A duplicate event can arrive after this recording already finished (e.g. a
+    // stale-pending requeue whose original run only just completed, or a manual
+    // re-ingest). Skip the expensive re-download/transcribe when it's already
+    // done. In-flight duplicates are handled upstream by the singleton config.
+    const alreadyCompleted = await step.run(`check-status-${recordingId}`, async () => {
+      const [row] = await db
+        .select({ status: recordings.status })
+        .from(recordings)
+        .where(eq(recordings.id, recordingId))
+        .limit(1);
+      return row?.status === "completed";
+    });
+    if (alreadyCompleted) {
+      return { recordingId, status: "completed", skipped: "already completed" };
+    }
 
     const audioPath = await step.run(`download-${recordingId}`, async () => {
       await db.update(recordings)

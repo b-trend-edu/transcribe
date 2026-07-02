@@ -7,8 +7,13 @@ services:
     pull_policy: always
     # torch 2.8.0 cu128 wheels are amd64-only (see Dockerfile).
     platform: linux/amd64
-    expose:
-      - "3000"
+    ports:
+      # Publish the app ONLY on the host's Tailscale IP, so it is reachable over
+      # the tailnet (http://<tailnet-ip>:3000 or http://<magicdns-name>:3000) but
+      # NOT on any public/LAN interface. Set TAILSCALE_IP in Coolify to this
+      # host's `tailscale ip -4`. (If TAILSCALE_IP is empty it binds all
+      # interfaces — don't leave it blank on a public host.)
+      - "${TAILSCALE_IP}:3000:3000"
     environment:
       - BBB_BASE_URL=${BBB_BASE_URL}
       - BBB_SHARED_SECRET=${BBB_SHARED_SECRET}
@@ -67,8 +72,13 @@ services:
   inngest:
     image: inngest/inngest
     command: "inngest start"
+    # 8288 = Inngest dashboard/API — published on the Tailscale IP only, so the
+    # dashboard is reachable over the tailnet (http://<tailnet-ip>:8288) but not
+    # publicly. 8289 = internal connect gateway; kept off the host (the app
+    # reaches it in-network via INNGEST_BASE_URL=http://inngest:8288).
+    ports:
+      - "${TAILSCALE_IP}:8288:8288"
     expose:
-      - "8288"
       - "8289"
     environment:
       # Both keys must be hex strings with an even number of characters

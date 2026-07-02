@@ -171,6 +171,50 @@ Postgres + Redis**.
 - `linux/amd64` — the torch 2.8 cu128 wheels are amd64-only.
 - VRAM: `large-v3` + diarization needs roughly **10–13 GB**.
 
+### GPU host setup
+
+The compose file requests `driver: nvidia` GPU access, which needs **two**
+separate things on the host:
+
+1. The **NVIDIA driver** — check with `nvidia-smi`. If it prints the GPU table,
+   the kernel driver is installed.
+2. The **NVIDIA Container Toolkit** — the bridge that lets Docker hand the GPU to
+   a container. `nvidia-smi` working does **not** imply this is installed.
+
+Install and register the toolkit with Docker (Ubuntu/Debian):
+
+```sh
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+apt-get update
+apt-get install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker   # registers the runtime with Docker
+systemctl restart docker
+```
+
+Verify Docker can reach the GPU before deploying the stack:
+
+```sh
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
+```
+
+**Troubleshooting**
+
+- `Error response from daemon: could not select device driver "nvidia" with
+  capabilities: [[gpu]]` — the Container Toolkit (step 2) is missing or not
+  registered with Docker. Run the install block above, then
+  `systemctl restart docker` and redeploy.
+- `CUDA driver version is insufficient for CUDA runtime version` (or a
+  cuDNN/cuBLAS load failure at transcription time) — the host driver is too old
+  for the image's CUDA 12.8 runtime. The image relies on CUDA 12.x minor-version
+  forward compatibility, so a driver advertising CUDA **12.0+** (`nvidia-smi` top
+  right) usually works; if it doesn't, upgrade the host driver to a **560+**
+  release and reboot.
+
 ### Image build (CI)
 
 `.github/workflows/build.yml` builds the CUDA + WhisperX + Bun image and pushes

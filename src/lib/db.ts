@@ -3,7 +3,6 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
-// --- Schema ---
 
 export const statusEnum = pgEnum("recording_status", [
   "pending",
