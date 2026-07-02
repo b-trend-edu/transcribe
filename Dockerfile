@@ -51,11 +51,13 @@ ENV HF_HOME=/models/huggingface \
 RUN mkdir -p /models/huggingface/hub /models/torch /models/cache \
     && python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='cpu', compute_type='int8')" || true
 
-# ---- Prune the venv: strip caches, stubs, tests, headers, static libs --------
+# ---- Prune the venv: strip caches, stubs, headers, static libs --------------
 # These are never needed at runtime and account for 1-2 GB in the torch/nvidia
 # wheels alone. cuDNN/cuBLAS *.so.* shared libs are deliberately kept.
+# NOTE: do NOT delete package 'test'/'tests' dirs — numpy imports pd_NA from
+# numpy/_core/tests/_natype.py at runtime (via numpy.testing), so removing them
+# breaks the whole numpy -> scipy -> sklearn -> transformers -> whisperx chain.
 RUN find /opt/venv -depth -type d -name '__pycache__' -exec rm -rf {} + \
-    && find /opt/venv -depth -type d \( -name 'test' -o -name 'tests' \) -exec rm -rf {} + \
     && find /opt/venv -type f \( -name '*.pyc' -o -name '*.pyi' -o -name '*.a' \) -delete \
     && find /opt/venv/lib -depth -type d -path '*/nvidia/*/include' -exec rm -rf {} +
 
