@@ -515,7 +515,14 @@ export const processRecording = inngest.createFunction(
         );
         if (!res.success) {
           logger.warn(
-            { recordingId, lang, messageKey: res.messageKey },
+            {
+              recordingId,
+              lang,
+              status: res.status,
+              messageKey: res.messageKey,
+              message: res.message,
+              rawBody: res.rawBody,
+            },
             "caption upload rejected by BBB"
           );
         }
