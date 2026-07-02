@@ -132,6 +132,11 @@ export interface CaptionUploadResult {
   success: boolean;
   messageKey?: string;
   message?: string;
+  /** HTTP status of the putRecordingTextTrack call (0 = network error). */
+  status: number;
+  /** First 500 chars of the raw response body — set when the call was not a
+   *  clean SUCCESS, so the exact BBB error (or non-XML/HTML page) is visible. */
+  rawBody?: string;
 }
 
 /**
@@ -169,10 +174,15 @@ export async function uploadCaptionTrack(
   const xml = await response.text();
 
   const returncode = xml.match(/<returncode>(.*?)<\/returncode>/)?.[1];
+  const success = response.ok && returncode === "SUCCESS";
   return {
-    success: response.ok && returncode === "SUCCESS",
+    success,
     messageKey: xml.match(/<messageKey>(.*?)<\/messageKey>/)?.[1],
     message: xml.match(/<message>(.*?)<\/message>/)?.[1],
+    status: response.status,
+    // Only carry the body when something went wrong (keeps success logs quiet
+    // and exposes non-XML/HTML error pages that have no messageKey/message).
+    rawBody: success ? undefined : xml.slice(0, 500),
   };
 }
 
