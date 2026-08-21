@@ -54,6 +54,22 @@ Inngest dashboard: `http://<BIND_IP>:8288`
 | App memory | 16g | 12g — host has 19.4 GiB total |
 | Language | auto-detect | `de` |
 
+## Gotchas found during the first deploy
+
+- **`BBB_BASE_URL` must include `/bigbluebutton`.** `buildApiUrl()` appends only
+  `/api/<call>`, so a bare host 404s on every API call — silently, since the
+  sweep just finds nothing.
+- **`NODE_ENV` must be set to `production`.** Neither this file nor
+  `docker-compose.prod.yaml` set it originally; without it Bun logs "development
+  server" and libraries fall back to dev behaviour (verbose errors, stack traces
+  in responses).
+- **`INNGEST_SERVE_HOST` must be the compose service name.** Otherwise the SDK
+  advertises `http://localhost:3000`, which from the inngest container resolves
+  to inngest itself — functions register but can never be invoked.
+- **The app must be synced to Inngest once** after first start:
+  `docker compose exec app bun -e 'fetch("http://localhost:3000/api/inngest",{method:"PUT"})'`
+  Until then the Apps page is empty and no crons are scheduled.
+
 ## Known constraints
 
 - **No `/recordings` mount.** BBB runs at `bbb.otterdeploy.com`, so the disk-scan

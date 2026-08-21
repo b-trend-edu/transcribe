@@ -33,6 +33,7 @@ services:
       # responses - unless this is set. The Dockerfile CMD is already a plain
       # `bun run` with no --hot, so this is the only thing that was missing.
       - NODE_ENV=production
+      # MUST end with /bigbluebutton — the SDK appends only "/api/<call>".
       - BBB_BASE_URL=${BBB_BASE_URL}
       - BBB_SHARED_SECRET=${BBB_SHARED_SECRET}
       - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
@@ -51,6 +52,10 @@ services:
       # Media is downloaded over HTTPS from BBB_BASE_URL.
       - RECORDINGS_DIR=
       - PUBLISH_CAPTIONS=${PUBLISH_CAPTIONS:-true}
+      # import  = reuse the VTT BBB already serves (no GPU work)
+      # skip    = mark done, store nothing
+      # ignore  = re-transcribe everything (pre-existing behaviour)
+      - EXISTING_CAPTIONS=${EXISTING_CAPTIONS:-import}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
       - TRANSCRIBE_CONCURRENCY=1
 
