@@ -36,9 +36,11 @@ const envSchema = z
     WHISPER_MODEL: z
       .enum(["tiny", "base", "small", "medium", "large", "large-v2", "large-v3"])
       .default("large-v3"),
-    // Force the spoken language (e.g. "de") instead of auto-detecting. Recommended
-    // for single-language deployments — auto-detect can mislabel short/quiet audio.
-    WHISPER_LANGUAGE: z.string().min(2).optional(),
+    // Force the spoken language instead of auto-detecting. Defaults to German
+    // ("de") — auto-detect can mislabel short/quiet audio (e.g. as Welsh "cy",
+    // which then crashes WhisperX alignment). Set to "auto" to re-enable
+    // detection for multi-language deployments.
+    WHISPER_LANGUAGE: z.string().min(2).default("de"),
     // Mounted BBB recordings dir (e.g. /recordings -> /var/bigbluebutton/presentation).
     // When the media is found locally under it, transcribe it directly instead of
     // downloading over HTTP. Leave unset to always download.
@@ -497,7 +499,10 @@ export const processRecording = inngest.createFunction(
     // must NOT fail the job or flip the recording back to "failed".
     await step.run(`publish-captions-${recordingId}`, async () => {
       const e = getEnv();
-      const lang = e.WHISPER_LANGUAGE ?? result.language;
+      // "auto" means we let WhisperX detect it — use the detected language for
+      // the caption track, not the literal "auto".
+      const lang =
+        e.WHISPER_LANGUAGE === "auto" ? result.language : e.WHISPER_LANGUAGE;
 
       if (!e.PUBLISH_CAPTIONS) return { skipped: "disabled" };
       if (!lang || lang === "unknown" || !result.vtt.trim()) {

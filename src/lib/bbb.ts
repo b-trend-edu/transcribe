@@ -171,19 +171,66 @@ export async function uploadCaptionTrack(
   form.append("file", new Blob([vtt], { type: "text/vtt" }), `caption_${lang}.vtt`);
 
   const response = await fetch(url, { method: "POST", body: form });
-  const xml = await response.text();
+  const body = await response.text();
 
-  const returncode = xml.match(/<returncode>(.*?)<\/returncode>/)?.[1];
+  // putRecordingTextTrack replies with JSON on some BBB versions
+  // (`{"response":{"returncode":"SUCCESS",...}}`) and XML on others. Parse JSON
+  // first, then fall back to the XML regex, so both shapes are handled.
+  let returncode: string | undefined;
+  let messageKey: string | undefined;
+  let message: string | undefined;
+  try {
+    const r = (JSON.parse(body) as { response?: Record<string, string> }).response;
+    returncode = r?.returncode;
+    messageKey = r?.messageKey;
+    message = r?.message;
+  } catch {
+    returncode = body.match(/<returncode>(.*?)<\/returncode>/)?.[1];
+    messageKey = body.match(/<messageKey>(.*?)<\/messageKey>/)?.[1];
+    message = body.match(/<message>(.*?)<\/message>/)?.[1];
+  }
+
   const success = response.ok && returncode === "SUCCESS";
   return {
     success,
-    messageKey: xml.match(/<messageKey>(.*?)<\/messageKey>/)?.[1],
-    message: xml.match(/<message>(.*?)<\/message>/)?.[1],
+    messageKey,
+    message,
     status: response.status,
     // Only carry the body when something went wrong (keeps success logs quiet
-    // and exposes non-XML/HTML error pages that have no messageKey/message).
-    rawBody: success ? undefined : xml.slice(0, 500),
+    // and exposes non-JSON/XML/HTML error pages that have no messageKey/message).
+    rawBody: success ? undefined : body.slice(0, 500),
   };
+}
+
+export interface RecordingTextTrack {
+  /** URL of the served track (present once BBB has processed the upload). */
+  href?: string;
+  kind: string;
+  label: string;
+  lang: string;
+  /** "upload" for tracks pushed via putRecordingTextTrack. */
+  source: string;
+}
+
+/**
+ * List the text tracks BBB currently serves for a recording. Unlike most BBB
+ * APIs this one returns JSON (`{ response: { returncode, tracks } }`), not XML.
+ * A track only shows up here AFTER the async caption worker has processed the
+ * upload, so this is the way to confirm a putRecordingTextTrack actually landed.
+ */
+export async function getRecordingTextTracks(
+  baseUrl: string,
+  secret: string,
+  recordId: string
+): Promise<RecordingTextTrack[]> {
+  const queryString = new URLSearchParams({ recordID: recordId }).toString();
+  const url = buildApiUrl(baseUrl, "getRecordingTextTracks", queryString, secret);
+  const response = await fetch(url);
+  const json = (await response.json().catch(() => null)) as
+    | { response?: { tracks?: RecordingTextTrack[] } }
+    | null;
+  const tracks = json?.response?.tracks;
+  return Array.isArray(tracks) ? tracks : [];
 }
 
 export async function fetchRecordings(
