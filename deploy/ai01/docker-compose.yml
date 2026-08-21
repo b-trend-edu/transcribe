@@ -1,0 +1,172 @@
+# transcribe — deployment for ai01 (on-prem GPU box, 10.1.10.11)
+#
+# Differences from docker-compose.prod.yaml (the Coolify/tailnet variant):
+#   1. No Tailscale. Binds to ${BIND_IP} (default 127.0.0.1) instead of
+#      ${TAILSCALE_IP}. This host is on the private LAN and must never be
+#      internet-facing.
+#   2. No BBB recordings mount. BBB runs in the cloud (bbb.otterdeploy.com), not
+#      on this box, so RECORDINGS_DIR is unset and media is fetched over HTTPS.
+#      The :ro bind mount is removed entirely — it would mount an empty dir and
+#      make every recording look "found but empty".
+#   3. GPU is an RTX 4070 (16 GB), not 32 GB. Batch size and memory limits are
+#      sized for that.
+#   4. Container memory limits fit a 19.4 GiB host (the prod file's 16g app limit
+#      plus the other services over-commits this machine).
+#   5. Adds an explicit healthcheck on the app.
+
+services:
+  app:
+    image: ghcr.io/b-trend-edu/transcribe:${IMAGE_TAG:-latest}
+    pull_policy: always
+    platform: linux/amd64
+    # The real GPU handoff. `deploy.resources.devices` alone is ignored by some
+    # engines; runtime:nvidia + NVIDIA_VISIBLE_DEVICES works everywhere.
+    # Requires nvidia-container-toolkit on the host.
+    runtime: nvidia
+    ports:
+      # LAN-only. Set BIND_IP=10.1.10.11 in .env for LAN access, or leave at
+      # 127.0.0.1 for localhost-only. NEVER 0.0.0.0 on this host.
+      - "${BIND_IP:-127.0.0.1}:3000:3000"
+    environment:
+      # Bun prints "Started development server" and libraries (Hono et al.)
+      # default to dev behaviour - including verbose errors and stack traces in
+      # responses - unless this is set. The Dockerfile CMD is already a plain
+      # `bun run` with no --hot, so this is the only thing that was missing.
+      - NODE_ENV=production
+      - BBB_BASE_URL=${BBB_BASE_URL}
+      - BBB_SHARED_SECRET=${BBB_SHARED_SECRET}
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - INNGEST_BASE_URL=http://inngest:8288
+      # The SDK advertises its own callback URL when it registers. Without this
+      # it advertises http://localhost:3000, which from the inngest container
+      # resolves to inngest itself - functions register but can never be
+      # invoked. Must be the compose service name.
+      - INNGEST_SERVE_HOST=http://app:3000
+      - INNGEST_SERVE_PATH=/api/inngest
+      - DATABASE_URL=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/transcribe
+
+      # ---- discovery / output ----
+      # EMPTY on purpose: BBB is remote, so there is no local recordings dir.
+      # Media is downloaded over HTTPS from BBB_BASE_URL.
+      - RECORDINGS_DIR=
+      - PUBLISH_CAPTIONS=${PUBLISH_CAPTIONS:-true}
+      - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
+      - TRANSCRIBE_CONCURRENCY=1
+
+      # ---- GPU ----
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+      # ---- WhisperX, sized for 16 GB VRAM ----
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
+      # German content: pin the language rather than auto-detecting per file.
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-de}
+      - WHISPERX_DEVICE=cuda
+      - WHISPERX_COMPUTE_TYPE=${WHISPERX_COMPUTE_TYPE:-float16}
+      # 16 is the upstream default and assumes plenty of VRAM. On a 16 GB card
+      # with large-v3 (+ optional diarization) that risks OOM — start at 8.
+      - WHISPERX_BATCH_SIZE=${WHISPERX_BATCH_SIZE:-8}
+      # Diarization adds ~3-4 GB VRAM and needs a HF token whose account has
+      # accepted the pyannote licences. Off until the base path is proven.
+      - DIARIZE=${DIARIZE:-false}
+      - MIN_SPEAKERS=${MIN_SPEAKERS:-}
+      - MAX_SPEAKERS=${MAX_SPEAKERS:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+
+      # weight cache -> the whisperx_models volume
+      - HF_HOME=/models/huggingface
+      - TORCH_HOME=/models/torch
+      - XDG_CACHE_HOME=/models/cache
+    volumes:
+      - whisperx_models:/models
+      # NOTE: no /recordings mount. See header note 2.
+    depends_on:
+      inngest:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e 'fetch(\"http://localhost:3000/\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+        reservations:
+          memory: 2g
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  inngest:
+    image: inngest/inngest
+    command: "inngest start"
+    ports:
+      - "${BIND_IP:-127.0.0.1}:8288:8288"
+    expose:
+      - "8289"
+    environment:
+      - INNGEST_EVENT_KEY=${INNGEST_EVENT_KEY}
+      - INNGEST_SIGNING_KEY=${INNGEST_SIGNING_KEY}
+      - INNGEST_POSTGRES_URI=postgres://inngest:${POSTGRES_PASSWORD}@postgres:5432/inngest
+      - INNGEST_REDIS_URI=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # image ships no curl/wget/nc; bash /dev/tcp is the only probe available
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8288 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  postgres:
+    image: postgres:17
+    environment:
+      - POSTGRES_DB=inngest
+      - POSTGRES_USER=inngest
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inngest -d inngest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  postgres_data:
+  redis_data:
+  whisperx_models:

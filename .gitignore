@@ -3,3 +3,8 @@ data/
 .env
 *.db
 /tmp/
+
+# Local operator-script inputs/outputs (contain real meeting content)
+course.json
+course.captions.json
+*.vtt

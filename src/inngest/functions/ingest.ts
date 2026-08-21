@@ -2,6 +2,7 @@ import { inngest } from "../client";
 import { NonRetriableError } from "inngest";
 import { db, recordings, transcripts } from "../../lib/db";
 import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
+import { findExistingCaption, captionMode } from "../../lib/existing-captions";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
 import logger from "../../lib/logger";
@@ -152,6 +153,43 @@ export const sweep = inngest.createFunction(
       // the same order — no deadlock.
       newOnes.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0));
 
+      // --- Skip / import recordings BBB already has captions for -------------
+      // Without this, a fresh DB against an established server queues every
+      // already-captioned recording for a full GPU transcription (~300 here).
+      // Bounded concurrency: one getRecordingTextTracks call per candidate, and
+      // DISCOVERY_BATCH can be 200.
+      const { EXISTING_CAPTIONS, WHISPER_LANGUAGE } = getEnv() as unknown as {
+        EXISTING_CAPTIONS?: string;
+        WHISPER_LANGUAGE?: string;
+      };
+      const mode = captionMode(EXISTING_CAPTIONS);
+      const preexisting = new Map<string, Awaited<ReturnType<typeof findExistingCaption>>>();
+      if (mode !== "ignore") {
+        const CHECK_CONCURRENCY = 8;
+        for (let i = 0; i < newOnes.length; i += CHECK_CONCURRENCY) {
+          const batch = newOnes.slice(i, i + CHECK_CONCURRENCY);
+          const results = await Promise.all(
+            batch.map((rec) =>
+              findExistingCaption(
+                BBB_BASE_URL,
+                BBB_SHARED_SECRET,
+                rec.recordId,
+                WHISPER_LANGUAGE || undefined,
+                mode
+              )
+            )
+          );
+          batch.forEach((rec, j) => preexisting.set(rec.recordId, results[j]!));
+        }
+        const hits = [...preexisting.values()].filter((r) => r.found).length;
+        if (hits > 0) {
+          logger.info(
+            { hits, of: newOnes.length, mode },
+            "recordings already captioned on BBB — not queued for transcription"
+          );
+        }
+      }
+
       // Insert idempotently inside a transaction and dispatch ONLY rows this run
       // actually inserted. onConflictDoNothing().returning() yields a row only on
       // a real insert, so a race with the folder scan can neither throw a
@@ -173,9 +211,30 @@ export const sweep = inngest.createFunction(
             })
             .onConflictDoNothing()
             .returning({ id: recordings.id });
-          if (row) {
-            claimed.push({ recordingId: rec.recordId, videoUrl: rec.videoUrl });
+          if (!row) continue;
+
+          // Already captioned on BBB: record it as done and never dispatch a
+          // transcription for it. In "import" mode we also persist the VTT BBB
+          // already serves, so the row is usable for summarisation later.
+          const pre = preexisting.get(rec.recordId);
+          if (pre?.found) {
+            if (pre.caption) {
+              await tx.insert(transcripts).values({
+                recordingId: rec.recordId,
+                text: pre.caption.text,
+                vtt: pre.caption.vtt,
+                language: pre.caption.language,
+                durationSeconds: pre.caption.durationSeconds,
+                model: "imported:bbb",
+              }).onConflictDoNothing();
+            }
+            await tx.update(recordings)
+              .set({ status: "completed" })
+              .where(eq(recordings.id, rec.recordId));
+            continue;
           }
+
+          claimed.push({ recordingId: rec.recordId, videoUrl: rec.videoUrl });
         }
         return claimed;
       });
@@ -361,6 +420,49 @@ export const processRecording = inngest.createFunction(
     });
     if (alreadyCompleted) {
       return { recordingId, status: "completed", skipped: "already completed" };
+    }
+
+    // Last gate before any expensive work: BBB may already serve a caption for
+    // this recording (captioned outside this service, or discovered before the
+    // caption landed). Cheaper to ask than to download a 2 GB file and burn
+    // ~40 min of GPU. In "import" mode the existing VTT becomes the transcript.
+    const reused = await step.run(`check-existing-caption-${recordingId}`, async () => {
+      const env = getEnv() as unknown as {
+        BBB_BASE_URL: string;
+        BBB_SHARED_SECRET: string;
+        EXISTING_CAPTIONS?: string;
+        WHISPER_LANGUAGE?: string;
+      };
+      const mode = captionMode(env.EXISTING_CAPTIONS);
+      if (mode === "ignore") return false;
+
+      const { found, caption } = await findExistingCaption(
+        env.BBB_BASE_URL,
+        env.BBB_SHARED_SECRET,
+        recordingId,
+        env.WHISPER_LANGUAGE || undefined,
+        mode
+      );
+      if (!found) return false;
+
+      if (caption) {
+        await db.insert(transcripts).values({
+          recordingId,
+          text: caption.text,
+          vtt: caption.vtt,
+          language: caption.language,
+          durationSeconds: caption.durationSeconds,
+          model: "imported:bbb",
+        }).onConflictDoNothing();
+      }
+      await db.update(recordings)
+        .set({ status: "completed", updatedAt: Math.floor(Date.now() / 1000) })
+        .where(eq(recordings.id, recordingId));
+      logger.info({ recordingId, imported: Boolean(caption) }, "reused existing BBB caption");
+      return true;
+    });
+    if (reused) {
+      return { recordingId, status: "completed", skipped: "existing caption on BBB" };
     }
 
     const audioPath = await step.run(`download-${recordingId}`, async () => {
