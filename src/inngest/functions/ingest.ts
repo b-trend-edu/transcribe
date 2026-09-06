@@ -100,7 +100,13 @@ const failureEventSchema = z.object({
 // against a host with a large backlog would otherwise build one huge
 // step.sendEvent that exceeds Inngest's per-request limit (max 5000 events /
 // ~256KiB body) and fail the whole send; the remainder drains over later runs.
-const DISCOVERY_BATCH = 200;
+// Overridable via DISCOVERY_BATCH so a first run against a large backlog can be
+// throttled (e.g. 5) without rebuilding the image, then raised once one job has
+// been observed end to end. Read at module load, so process.env directly.
+const DISCOVERY_BATCH = Math.max(
+  1,
+  Math.trunc(Number(process.env.DISCOVERY_BATCH)) || 200
+);
 // Chunk a run's dispatch so even the capped batch stays well under the per-send
 // limit and each chunk is its own retryable step.
 const DISPATCH_CHUNK = 100;
