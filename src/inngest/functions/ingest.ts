@@ -7,7 +7,7 @@ import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
 import logger from "../../lib/logger";
 import { and, eq, lt, ne } from "drizzle-orm";
-import { existsSync, mkdirSync, statSync, unlinkSync, symlinkSync } from "fs";
+import { existsSync, mkdirSync, statSync, unlinkSync, symlinkSync, renameSync } from "fs";
 import { join } from "path";
 import * as z from "zod";
 
@@ -524,7 +524,38 @@ export const processRecording = inngest.createFunction(
           continue;
         }
         const outputPath = join(TEMP_DIR, `${recordingId}.${ext}`);
-        await Bun.write(outputPath, response);
+        if (!response.body) {
+          lastStatus = 502; // 200 with no body
+          continue;
+        }
+        // NOT `Bun.write(outputPath, response)`: on a large streaming body that
+        // call consumes the whole response and then stalls forever without ever
+        // creating the file (reproduced at 894 MB — the step never returns and
+        // no error surfaces). Stream the body to disk explicitly instead.
+        //
+        // Write to `.part` and rename on success, so an interrupted download can
+        // never be mistaken for a finished one by the reuse check above.
+        const partPath = `${outputPath}.part`;
+        const writer = Bun.file(partPath).writer();
+        try {
+          for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+            writer.write(chunk);
+          }
+          await writer.end();
+        } catch (err) {
+          try {
+            await writer.end();
+          } catch {
+            // already closed
+          }
+          try {
+            unlinkSync(partPath);
+          } catch {
+            // nothing to clean up
+          }
+          throw err;
+        }
+        renameSync(partPath, outputPath);
         return outputPath;
       }
 
