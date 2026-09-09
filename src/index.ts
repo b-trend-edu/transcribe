@@ -6,6 +6,7 @@ import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
 import { sweep, scanRecordings, processRecording } from "./inngest/functions/ingest";
 import { summarizeRecording, summarizeSweep } from "./inngest/functions/summarize";
+import { translateRecording, translateSweep } from "./inngest/functions/translate";
 import { db, recordings, transcripts } from "./lib/db";
 import pinoLogger from "./lib/logger";
 import { eq, count } from "drizzle-orm";
@@ -362,7 +363,7 @@ app.get("/scalar", Scalar({ url: "/doc", pageTitle: "Transcribe API" }));
 
 const inngestHandler = serve({
   client: inngest,
-  functions: [sweep, scanRecordings, processRecording, summarizeRecording, summarizeSweep],
+  functions: [sweep, scanRecordings, processRecording, summarizeRecording, summarizeSweep, translateRecording, translateSweep],
 });
 
 app.use("/api/inngest", async (c) => inngestHandler(c));
