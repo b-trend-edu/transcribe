@@ -23,7 +23,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { inngest } from "../client";
 import { db, transcripts } from "../../lib/db";
-import { TRANSLATE_MODEL, assertModel, chat } from "../../lib/ollama";
+import { TRANSLATE_MODEL, WARM, assertModel, chat, unload } from "../../lib/ollama";
 import {
   CUES_SCHEMA,
   TRANSLATE_PROMPT_VERSION,
@@ -33,7 +33,7 @@ import {
 } from "../../lib/translate-prompt";
 import { batchCues, cuesToText, parseVtt, serialiseVtt, type Cue } from "../../lib/vtt";
 
-const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 16384);
+const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 40960);
 /** Chars of cue text per request. Small enough to leave room for the reply,
  *  large enough that a 4-hour recording is ~100 requests rather than ~4000. */
 const BATCH_CHARS = Number(process.env.TRANSLATE_BATCH_CHARS ?? 2500);
@@ -47,6 +47,10 @@ async function translateBatch(texts: string[]): Promise<string[]> {
     user: translateUser(texts),
     schema: CUES_SCHEMA as unknown as Record<string, unknown>,
     numCtx: NUM_CTX,
+    // WARM matters most here: a recording is ~100 batch calls, and reloading a
+    // 19 GB model for each would cost ~12 minutes per recording in loading
+    // alone. unload() at the end of the run gives the VRAM back.
+    keepAlive: WARM,
   });
   if (!Array.isArray(out?.cues)) throw new Error("translation reply had no cues array");
   return out.cues;
@@ -160,6 +164,8 @@ export const translateRecording = inngest.createFunction(
           },
         });
     });
+
+    await step.run("unload-model", () => unload(TRANSLATE_MODEL).then(() => "released"));
 
     return { recordingId, cues: cues.length, batches: batches.length };
   }

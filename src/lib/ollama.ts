@@ -21,9 +21,19 @@ const HOST = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
 export const SUMMARY_MODEL = process.env.OLLAMA_SUMMARY_MODEL ?? "gemma4:12b";
 export const TRANSLATE_MODEL = process.env.OLLAMA_TRANSLATE_MODEL ?? "gemma4:12b";
 
-// 0 = unload as soon as the call returns. Do not raise this without also
-// serialising against WhisperX, or transcription will OOM.
+// Default: unload as soon as the call returns, so Ollama is not squatting on
+// VRAM that WhisperX needs.
+//
+// MEASURED (ai01, qwen3:30b-a3b Q4_K_M, 2026-09-09): loading the model costs
+// 7-10s. That is noise for a single summary, and ruinous for translation, which
+// issues ~100 batch calls per recording — 12 minutes of pure loading each.
+//
+// So callers doing many calls in one run pass WARM, then MUST call unload() when
+// finished. That is safe only because every GPU function shares one serialised
+// Inngest lane: nothing else can start while the run holds it. Without the
+// unload, the model would still be resident when WhisperX next starts.
 const KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "0";
+export const WARM = process.env.OLLAMA_KEEP_ALIVE_WARM ?? "10m";
 
 /** Rough tokens-for-German heuristic. Only used for chunking decisions, never
  *  for billing, so an approximation is fine — but German compounds tokenize
@@ -45,6 +55,9 @@ type ChatOpts = {
   numCtx?: number;
   temperature?: number;
   timeoutMs?: number;
+  /** Override how long Ollama holds the model after this call. Pass WARM for a
+   *  multi-call run, and call unload() at the end of it. */
+  keepAlive?: string;
 };
 
 export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unknown ? any : T> {
@@ -52,6 +65,7 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
     model, system, user, schema,
     numCtx = 8192,
     temperature = 0.2,
+    keepAlive = KEEP_ALIVE,
     // Translation of a long transcript legitimately runs for tens of minutes on
     // this hardware; a default fetch timeout would kill it mid-way.
     timeoutMs = 60 * 60 * 1000,
@@ -68,7 +82,7 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
       body: JSON.stringify({
         model,
         stream: false,
-        keep_alive: KEEP_ALIVE,
+        keep_alive: keepAlive,
         ...(schema ? { format: schema } : {}),
         options: { temperature, num_ctx: numCtx },
         messages: [
@@ -103,6 +117,25 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
     throw new OllamaError(
       `ollama ${model} did not return JSON despite a schema: ${content.slice(0, 200)}`
     );
+  }
+}
+
+/**
+ * Release the model's VRAM immediately.
+ *
+ * Call this at the end of any run that used WARM. Best-effort by design: a
+ * failure here must not fail work that already succeeded, and Ollama will drop
+ * the model on its own timer regardless.
+ */
+export async function unload(model: string): Promise<void> {
+  try {
+    await fetch(`${HOST}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, messages: [], keep_alive: 0 }),
+    });
+  } catch {
+    /* best effort */
   }
 }
 

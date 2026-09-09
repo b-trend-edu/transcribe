@@ -17,7 +17,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { inngest } from "../client";
 import { db, recordings, summaries, transcripts } from "../../lib/db";
-import { SUMMARY_MODEL, approxTokens, assertModel, chat } from "../../lib/ollama";
+import { SUMMARY_MODEL, WARM, approxTokens, assertModel, chat, unload } from "../../lib/ollama";
 import {
   CHUNK_SYSTEM,
   PROMPT_VERSION,
@@ -33,7 +33,7 @@ const TARGETS = ["de", "en"] as const;
 // Context to allocate. gemma4:12b leaves ~8.5 GB free on a 16 GB card, which
 // comfortably holds this; raising it past the free VRAM makes Ollama silently
 // spill to CPU and throughput collapses.
-const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 16384);
+const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 40960);
 // Leave room for the system prompt and the reply inside NUM_CTX.
 const CHUNK_TOKENS = Math.floor(NUM_CTX * 0.6);
 
@@ -120,6 +120,7 @@ export const summarizeRecording = inngest.createFunction(
           system: CHUNK_SYSTEM,
           user: part,
           numCtx: NUM_CTX,
+          keepAlive: WARM,
         });
         if (!note.includes("(nothing taught)")) collected.push(`Section ${i + 1}:\n${note}`);
       }
@@ -137,6 +138,7 @@ export const summarizeRecording = inngest.createFunction(
             : userPrompt(source.text, source.meetingName),
           schema: SUMMARY_SCHEMA as unknown as Record<string, unknown>,
           numCtx: NUM_CTX,
+          keepAlive: WARM,
         });
         const title = result.title?.trim();
         const summary = result.summary?.trim();
@@ -170,6 +172,11 @@ export const summarizeRecording = inngest.createFunction(
       });
       written.push(lang);
     }
+
+    // Release the 19 GB before anything else wants the card. Not in a finally:
+    // a failed run is retried and will reload anyway, and Ollama drops the model
+    // on its own timer regardless.
+    await step.run("unload-model", () => unload(SUMMARY_MODEL).then(() => "released"));
 
     return { recordingId, written, chunked: Boolean(notes) };
   }
