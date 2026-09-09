@@ -4,7 +4,8 @@
     "dev": "bun run --hot src/index.ts",
     "publish-course": "bun --env-file=.env run scripts/publish-course.ts",
     "publish-captions": "bun --env-file=.env run scripts/publish-captions.ts",
-    "course-captions": "bun --env-file=.env run scripts/course-captions.ts"
+    "course-captions": "bun --env-file=.env run scripts/course-captions.ts",
+    "publish-summaries": "bun --env-file=.env run scripts/publish-summaries.ts"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.3.0",
