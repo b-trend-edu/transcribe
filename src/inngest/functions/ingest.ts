@@ -382,7 +382,14 @@ export const processRecording = inngest.createFunction(
     retries: 2,
     // Cap simultaneous transcriptions. Default 1 (single GPU: large-v3 +
     // diarization needs ~10-13 GB VRAM); tune with TRANSCRIBE_CONCURRENCY.
-    concurrency: { limit: TRANSCRIBE_CONCURRENCY },
+    // TWO constraints, not one. The first is this function's own limit; the
+    // second is the shared GPU lane, which summarisation and translation also
+    // take. Without the shared key those run in a DIFFERENT lane and can start
+    // while WhisperX is mid-transcription — one 16 GB card, two models, OOM.
+    concurrency: [
+      { limit: TRANSCRIBE_CONCURRENCY },
+      { scope: "account", key: '"gpu"', limit: 1 },
+    ],
     // A recording can be dispatched more than once (the sweep and folder-scan
     // crons overlap, and the stale-'pending' requeue re-pokes stranded rows), so
     // dedupe by recording id: while a run for this id is queued or running, any
