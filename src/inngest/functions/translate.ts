@@ -40,10 +40,10 @@ const BATCH_CHARS = Number(process.env.TRANSLATE_BATCH_CHARS ?? 2500);
 
 const MODEL_TAG = `translated:${TRANSLATE_MODEL}:${TRANSLATE_PROMPT_VERSION}`;
 
-async function translateBatch(texts: string[]): Promise<string[]> {
+async function translateBatch(texts: string[], from: string, to: string): Promise<string[]> {
   const out = await chat<CuesOut>({
     model: TRANSLATE_MODEL,
-    system: TRANSLATE_SYSTEM,
+    system: TRANSLATE_SYSTEM(from, to),
     user: translateUser(texts),
     schema: CUES_SCHEMA as unknown as Record<string, unknown>,
     numCtx: NUM_CTX,
@@ -58,8 +58,10 @@ async function translateBatch(texts: string[]): Promise<string[]> {
 
 /** Exact count or nothing. Falls back to one cue per request, which cannot
  *  misalign, rather than accepting a batch that lost or gained a line. */
-async function translateAligned(texts: string[], log: (m: string) => void): Promise<string[]> {
-  const first = await translateBatch(texts).catch((e) => {
+async function translateAligned(
+  texts: string[], from: string, to: string, log: (m: string) => void
+): Promise<string[]> {
+  const first = await translateBatch(texts, from, to).catch((e) => {
     log(`batch failed (${(e as Error).message}), falling back to per-cue`);
     return null;
   });
@@ -69,7 +71,7 @@ async function translateAligned(texts: string[], log: (m: string) => void): Prom
   const one: string[] = [];
   for (const text of texts) {
     if (!text.trim()) { one.push(""); continue; }
-    const r = await translateBatch([text]);
+    const r = await translateBatch([text], from, to);
     one.push(r[0] ?? text);
   }
   return one;
@@ -89,38 +91,39 @@ export const translateRecording = inngest.createFunction(
     const recordingId = event.data.recordingId as string;
     const force = Boolean(event.data.force);
 
-    const source = await step.run("load-german-vtt", async () => {
-      const [row] = await db
-        .select({ vtt: transcripts.vtt, duration: transcripts.durationSeconds })
+    // Translate INTO whichever of de/en is missing, from whatever exists. Most
+    // recordings are German and need English; 11 are English and need German;
+    // a couple are Portuguese or Ukrainian and need both. Hardcoding de -> en
+    // left all of those untranslated.
+    const source = await step.run("load-source-vtt", async () => {
+      const rows = await db
+        .select({
+          vtt: transcripts.vtt,
+          language: transcripts.language,
+          duration: transcripts.durationSeconds,
+        })
         .from(transcripts)
-        .where(and(eq(transcripts.recordingId, recordingId), eq(transcripts.language, "de")))
-        .limit(1);
-      return row ?? null;
+        .where(eq(transcripts.recordingId, recordingId));
+      const have = new Set(rows.map((r) => r.language));
+      const target = event.data.target ?? (have.has("de") ? "en" : "de");
+      if (have.has(target) && !force) return { done: true as const, target };
+      const from = rows.find((r) => r.language !== target && r.vtt) ?? null;
+      return from ? { done: false as const, target, ...from } : null;
     });
 
     // Only a cue-timed source can produce a caption track. A transcript with
     // text but no VTT is not translatable into subtitles, and silently
     // producing a text-only English row would look like success.
-    if (!source?.vtt?.trim()) {
-      logger.info(`${recordingId}: no German VTT, cannot produce a caption track`);
+    if (!source) {
+      logger.info(`${recordingId}: no cue-timed source, cannot produce a caption track`);
       return { skipped: "no-vtt" };
     }
-
-    if (!force) {
-      const existing = await step.run("check-existing", async () => {
-        const [row] = await db
-          .select({ id: transcripts.id })
-          .from(transcripts)
-          .where(and(eq(transcripts.recordingId, recordingId), eq(transcripts.language, "en")))
-          .limit(1);
-        return row ?? null;
-      });
-      if (existing) return { skipped: "already-translated" };
-    }
+    if (source.done) return { skipped: "already-translated", target: source.target };
+    const TARGET = source.target;
 
     await step.run("assert-model", () => assertModel(TRANSLATE_MODEL));
 
-    const { header, cues } = parseVtt(source.vtt);
+    const { header, cues } = parseVtt(source.vtt!);
     if (!cues.length) return { skipped: "no-cues" };
     const batches = batchCues(cues, BATCH_CHARS);
     logger.info(`${recordingId}: ${cues.length} cues in ${batches.length} batches`);
@@ -132,6 +135,8 @@ export const translateRecording = inngest.createFunction(
       const texts = await step.run(`translate-${i}`, async () =>
         translateAligned(
           batch.cues.map((c) => c.text.replace(/\n/g, " ")),
+          source.language ?? "de",
+          TARGET,
           (m) => logger.warn(`${recordingId} batch ${i}: ${m}`)
         )
       );
@@ -148,7 +153,7 @@ export const translateRecording = inngest.createFunction(
         .insert(transcripts)
         .values({
           recordingId,
-          language: "en",
+          language: TARGET,
           text: cuesToText(translated),
           vtt,
           durationSeconds: source.duration,
@@ -167,7 +172,7 @@ export const translateRecording = inngest.createFunction(
 
     await step.run("unload-model", () => unload(TRANSLATE_MODEL).then(() => "released"));
 
-    return { recordingId, cues: cues.length, batches: batches.length };
+    return { recordingId, from: source.language, to: TARGET, cues: cues.length, batches: batches.length };
   }
 );
 
@@ -182,16 +187,16 @@ export const translateSweep = inngest.createFunction(
     const batch = Number(process.env.TRANSLATE_BATCH ?? 3);
     const pending = await step.run("find-missing", async () => {
       const rows = await db.execute(sql`
-        SELECT de.recording_id AS id
-        FROM transcripts de
-        WHERE de.language = 'de'
-          AND de.vtt IS NOT NULL
-          AND length(de.text) >= 200
-          AND NOT EXISTS (
-            SELECT 1 FROM transcripts en
-            WHERE en.recording_id = de.recording_id AND en.language = 'en'
-          )
-        ORDER BY de.created_at DESC
+        SELECT src.recording_id AS id
+        FROM transcripts src
+        WHERE src.vtt IS NOT NULL
+          AND length(src.text) >= 200
+          AND (
+            SELECT count(DISTINCT language) FROM transcripts t
+            WHERE t.recording_id = src.recording_id AND t.language IN ('de','en')
+          ) < 2
+        GROUP BY src.recording_id, src.created_at
+        ORDER BY src.created_at DESC
         LIMIT ${batch}
       `);
       return (rows as unknown as { id: string }[]).map((r) => r.id);

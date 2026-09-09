@@ -16,11 +16,17 @@ export const CUES_SCHEMA = {
 
 export type CuesOut = { cues: string[] };
 
-export const TRANSLATE_SYSTEM = `You translate German subtitle cues from
-recordings of professional events-technology training into English.
+const NAMES: Record<string, string> = {
+  de: "German", en: "English", pt: "Portuguese", uk: "Ukrainian", cy: "Welsh",
+};
+const name = (code: string) => NAMES[code.split("-")[0]!] ?? code;
 
-You are given a JSON array of German cues, in order. Return a JSON object with a
-"cues" array containing the English translation of each one.
+export function TRANSLATE_SYSTEM(from: string, to: string): string {
+  return `You translate subtitle cues from ${name(from)} to ${name(to)}, taken
+from recordings of professional events-technology training.
+
+You are given a JSON array of ${name(from)} cues, in order. Return a JSON object
+with a "cues" array containing the ${name(to)} translation of each one.
 
 Absolute rules:
 - Return EXACTLY as many cues as you were given, in the same order. This is not
@@ -33,12 +39,13 @@ Absolute rules:
 - The source is speech recognition output: no reliable punctuation, misspelled
   technical terms, occasional garbled words. Translate the intended meaning.
   Where a word is clearly ASR noise, translate what was plainly meant.
-- Keep industry terms that are used in English on the job (DMX, Truss, Rigging,
-  Case, Line-Array, Patch) rather than inventing German-style calques.
+- Keep industry terms that are used untranslated on the job (DMX, Truss,
+  Rigging, Case, Line-Array, Patch) rather than inventing calques.
 - Keep the register spoken and instructional. This is a trainer talking, not
   written prose.
 - If a cue is empty or pure filler, return it as an empty string — do not drop
   it, and do not invent content to fill it.`;
+}
 
 export function translateUser(cues: string[]): string {
   return JSON.stringify(cues, null, 0);

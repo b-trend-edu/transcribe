@@ -67,22 +67,29 @@ export const summarizeRecording = inngest.createFunction(
     const recordingId = event.data.recordingId as string;
     const force = Boolean(event.data.force);
 
+    // Prefer German, but do NOT require it. 13 of 376 recordings were conducted
+    // in English, Portuguese or Ukrainian and have no German transcript at all;
+    // requiring `de` here silently left those with no summary. The model reads
+    // any of them and still produces both target languages.
     const source = await step.run("load-transcript", async () => {
-      const [row] = await db
+      const rows = await db
         .select({
           text: transcripts.text,
+          language: transcripts.language,
           meetingName: recordings.meetingName,
         })
         .from(transcripts)
         .innerJoin(recordings, eq(recordings.id, transcripts.recordingId))
-        .where(and(eq(transcripts.recordingId, recordingId), eq(transcripts.language, "de")))
-        .limit(1);
-      return row ?? null;
+        .where(eq(transcripts.recordingId, recordingId));
+      return rows.find((r) => r.language === "de") ?? rows[0] ?? null;
     });
 
     if (!source?.text?.trim()) {
-      logger.info(`no German transcript for ${recordingId}, nothing to summarise`);
+      logger.info(`no transcript in any language for ${recordingId}`);
       return { skipped: "no-transcript" };
+    }
+    if (source.language !== "de") {
+      logger.info(`${recordingId}: summarising from '${source.language}' (no German transcript)`);
     }
     // 8 of 375 recordings are genuinely silent. Do not spend GPU asking a model
     // to summarise nothing, and do not write a row claiming it did.
