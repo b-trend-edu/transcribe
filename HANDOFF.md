@@ -16,7 +16,7 @@ TypeScript). Lecture-level summaries (plan Phase 2) are deferred — see Blocker
 ## Current Status
 Phase 1 (chapters) was ported from `transcribe-insights.bundle` (branch
 `feat/insights-chapters`, one commit on top of `ba819cb`) onto `main` at
-`67067c7`, which had moved 13 commits in between. Verified 2026-09-10: `bun test` 46/46 across the five non-DB suites (20 new), `tsc --noEmit` clean, `drizzle-kit generate` produced `0002_insights` (new table + FK only), and `index.ts` module-loads with `insights/generate` + `insights/scan` registered.
+`67067c7`, which had moved 13 commits in between. Verified 2026-09-10: `bun test` 46/46 across the five non-DB suites (20 new), `tsc --noEmit` clean, `drizzle-kit generate` produced `0002_insights` (new table + FK only), and `index.ts` module-loads with `insights/generate` + `insights/scan` registered. `scripts/publish-chapters.ts` typechecks; its dry run needs the live DB and share (Felix).
 Nothing that needs the GPU, a live Postgres or the BBB host has run — that is
 Felix's side (Phase 1 DoD in the plan).
 
@@ -43,12 +43,12 @@ cue's end *before* the skip-gate, so a NULL duration (imported captions) is not
 misread as `too-short`.
 
 ## Next Steps (Felix, server side — plan Phase 1 DoD)
-1. `bun run src/migrate.ts` — applies `0002_insights`.
+1. Deploy the branch. CI builds images only for pushes to `main` and `v*` tags, so tag the branch head (`git tag v<next>-chapters.1 chapters-summary && git push origin v<next>-chapters.1`), set `IMAGE_TAG` in Coolify, add `INSIGHTS_BATCH=0` (keeps the hourly scan idle during the test) and optionally `OLLAMA_CHAPTERS_MODEL`, redeploy. The container runs `src/migrate.ts` on start, so `0002_insights` applies itself — check the log. `OLLAMA_HOST` is already set for summarize/translate.
 2. `ollama pull gemma4:12b`, or set `OLLAMA_CHAPTERS_MODEL` to the bake-off winner (`bun run bench-models`).
 3. `POST /insights/<recordId>/regenerate` for exactly 3 recordings (short / medium / 6 h), then `GET /insights/<recordId>` to review (`chapters` incl. `gist`, or `skipReason`). `GET …/chapters.json` is the player shape.
 4. Rate criteria 1–3 and 5 (plan §7). Watch `nvidia-smi`: never two models at once.
-5. **Delivery.** `f4ba406` decided summaries go to the share (`<recordId>/meta/summary.json`) via `scripts/publish-summaries.ts`, not an API — that is plan §8 answered. The player reads chapters from `<recordId>/chapters.json` (recording root). Follow-up: a `scripts/publish-chapters.ts` mirroring publish-summaries. The HTTP routes stay for review and the hand-copied test.
-6. Then let the scan run: `INSIGHTS_BATCH` (default 10) at `:45` hourly; it only touches recordings with no `insights` row.
+5. **Delivery.** `bun --env-file=.env run scripts/publish-chapters.ts` (dry run), then with `--commit`: writes `<recordId>/chapters.json` into the recording root, where `use-chapters.ts` reads it — same shape and safety as publish-summaries (`f4ba406` settled plan §8: a file on the share, not an API). Run it where publish-summaries runs. Check: `curl -sI https://vroom.b-trend.digital/presentation/<recordId>/chapters.json | head -1` → 200, then seekbar separators + "Kapitel" in the player. The HTTP routes stay for review.
+6. Rollout: drop `INSIGHTS_BATCH=0` (default 10 per hour at `:45`; only recordings with no `insights` row), re-run publish-chapters after each batch.
 
 ## Blockers / Open
 - **Phase 2 (lecture summary)**: still blocked on plan §2.5 (`recordings.meeting_id` holds the externalId OR the internal meetingID depending on which cron found the recording) — *and* now needs a design decision against the existing `summaries` table.
@@ -61,6 +61,7 @@ misread as `too-short`.
 - `src/inngest/functions/insights.ts` — `insights/generate` + `insights/scan`
 - `src/index.ts` — `GET /insights/:id/chapters.json`, `GET /insights/:id`, `POST /insights/:id/regenerate`
 - `src/lib/db.ts` (`insights` table) + `drizzle/0002_insights.sql`
+- `scripts/publish-chapters.ts` — DB → `<recordId>/chapters.json` on the share (`bun run publish-chapters`)
 
 ## Commands
 ```bash

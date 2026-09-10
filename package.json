@@ -6,6 +6,7 @@
     "publish-captions": "bun --env-file=.env run scripts/publish-captions.ts",
     "course-captions": "bun --env-file=.env run scripts/course-captions.ts",
     "publish-summaries": "bun --env-file=.env run scripts/publish-summaries.ts",
+    "publish-chapters": "bun --env-file=.env run scripts/publish-chapters.ts",
     "publish-translations": "bun --env-file=.env run scripts/publish-translations.ts",
     "bench-models": "bun --env-file=.env run scripts/bench-models.ts"
   },

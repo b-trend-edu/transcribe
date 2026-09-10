@@ -188,7 +188,10 @@ export const insightsGenerate = inngest.createFunction(
 export const insightsScan = inngest.createFunction(
   { id: "insights/scan", triggers: [{ cron: "45 * * * *" }] },
   async ({ step, logger }) => {
+    // INSIGHTS_BATCH=0 keeps the scan idle — for the test phase, when only
+    // hand-picked recordings should reach the GPU via POST /insights/:id/regenerate.
     const batch = Number(process.env.INSIGHTS_BATCH ?? 10);
+    if (batch <= 0) return { dispatched: 0, idle: true };
     const pending = await step.run("find-missing", async () => {
       // selectDistinct: transcripts has one row per language per recording.
       const rows = await db
