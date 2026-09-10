@@ -20,6 +20,7 @@
 const HOST = process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434";
 export const SUMMARY_MODEL = process.env.OLLAMA_SUMMARY_MODEL ?? "gemma4:12b";
 export const TRANSLATE_MODEL = process.env.OLLAMA_TRANSLATE_MODEL ?? "gemma4:12b";
+export const CHAPTERS_MODEL = process.env.OLLAMA_CHAPTERS_MODEL ?? "gemma4:12b";
 
 // Default: unload as soon as the call returns, so Ollama is not squatting on
 // VRAM that WhisperX needs.

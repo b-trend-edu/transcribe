@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, serial, pgEnum, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, serial, pgEnum, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
@@ -81,11 +81,34 @@ export const summaries = pgTable(
   })
 );
 
+// Chapters derived from a recording's transcript, one row per recording.
+//
+// The jsonb holds the player's chapters.json shape plus a per-chapter gist; the
+// endpoint strips the gist. skipReason is set INSTEAD of chapters when the
+// recording was not worth a GPU run (silent, garbled, too short) or generation
+// failed terminally — the hourly scan then leaves it alone until a regenerate.
+// Lecture-level summaries do not live here: `summaries` already covers title +
+// summary per recording, and a cross-part reduce (plan §3.3) is deferred.
+export const insights = pgTable("insights", {
+  id: serial("id").primaryKey(),
+  recordingId: text("recording_id")
+    .notNull()
+    .unique()
+    .references(() => recordings.id),
+  /** chapters.json content: [{ start, title, gist }] (gist dropped on the wire). */
+  chapters: jsonb("chapters"),
+  model: text("model"),
+  promptVersion: text("prompt_version"),
+  skipReason: text("skip_reason"),
+  createdAt: integer("created_at").default(sql`extract(epoch from now())::integer`),
+});
+
 // --- DB Instance ---
 
 export type Recording = typeof recordings.$inferSelect;
 export type Transcript = typeof transcripts.$inferSelect;
 export type Summary = typeof summaries.$inferSelect;
+export type Insight = typeof insights.$inferSelect;
 
 const client = postgres(process.env.DATABASE_URL ?? "postgres://inngest:password@localhost:5432/transcribe");
-export const db = drizzle(client, { schema: { recordings, transcripts, summaries } });
+export const db = drizzle(client, { schema: { recordings, transcripts, summaries, insights } });

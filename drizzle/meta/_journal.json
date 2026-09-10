@@ -15,6 +15,13 @@
       "when": 1788957509402,
       "tag": "0001_add_summaries_and_multilang_transcripts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789047048553,
+      "tag": "0002_insights",
+      "breakpoints": true
     }
   ]
 }

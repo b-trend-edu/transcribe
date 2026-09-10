@@ -7,7 +7,9 @@ import { inngest } from "./inngest/client";
 import { sweep, scanRecordings, processRecording } from "./inngest/functions/ingest";
 import { summarizeRecording, summarizeSweep } from "./inngest/functions/summarize";
 import { translateRecording, translateSweep } from "./inngest/functions/translate";
-import { db, recordings, transcripts } from "./lib/db";
+import { insightsGenerate, insightsScan } from "./inngest/functions/insights";
+import { db, recordings, transcripts, insights } from "./lib/db";
+import type { Chapter } from "./lib/chapters";
 import pinoLogger from "./lib/logger";
 import { eq, count } from "drizzle-orm";
 
@@ -346,6 +348,41 @@ app.openapi(ingestRoute, async (c) => {
   return c.json({ id, status: "pending", alreadyQueued: false }, 201);
 });
 
+// --- Insights (chapters) ---
+// Plain JSON, outside the OpenAPI spec: the player fetches chapters.json like a
+// static file, and 404 is what it already treats as "no chapters". Publishing
+// to the share (like publish-summaries.ts) is the follow-up; this is the review
+// and test path.
+
+app.get("/insights/:recordingId/chapters.json", async (c) => {
+  const { recordingId } = c.req.param();
+  const [row] = await db
+    .select({ chapters: insights.chapters })
+    .from(insights)
+    .where(eq(insights.recordingId, recordingId))
+    .limit(1);
+  if (!row?.chapters) return c.json({ error: "Not found" }, 404);
+  // Player schema is { start, title }; gist is internal.
+  return c.json((row.chapters as Chapter[]).map(({ start, title }) => ({ start, title })));
+});
+
+// Full row incl. gist, model, promptVersion and skipReason, for review.
+app.get("/insights/:recordingId", async (c) => {
+  const { recordingId } = c.req.param();
+  const [row] = await db.select().from(insights).where(eq(insights.recordingId, recordingId)).limit(1);
+  if (!row) return c.json({ error: "Not found" }, 404);
+  return c.json(row);
+});
+
+// Drop the row (chapters OR skipReason) and re-queue — brings a recording back
+// after a fix without the scan re-running the GPU on it every hour.
+app.post("/insights/:recordingId/regenerate", async (c) => {
+  const { recordingId } = c.req.param();
+  await db.delete(insights).where(eq(insights.recordingId, recordingId));
+  await inngest.send({ name: "insights/generate", data: { recordingId } });
+  return c.json({ recordingId, status: "queued" }, 202);
+});
+
 // --- OpenAPI & Scalar ---
 
 app.doc("/doc", {
@@ -363,7 +400,7 @@ app.get("/scalar", Scalar({ url: "/doc", pageTitle: "Transcribe API" }));
 
 const inngestHandler = serve({
   client: inngest,
-  functions: [sweep, scanRecordings, processRecording, summarizeRecording, summarizeSweep, translateRecording, translateSweep],
+  functions: [sweep, scanRecordings, processRecording, summarizeRecording, summarizeSweep, translateRecording, translateSweep, insightsGenerate, insightsScan],
 });
 
 app.use("/api/inngest", async (c) => inngestHandler(c));

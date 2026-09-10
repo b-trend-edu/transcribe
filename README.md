@@ -61,6 +61,9 @@ Interactive docs are served at `/scalar`; the raw OpenAPI spec at `/doc`.
 | `GET`    | `/transcripts/{id}` | Get one recording + its transcript.                               |
 | `DELETE` | `/transcripts/{id}` | Delete a recording and its transcript.                            |
 | `POST`   | `/ingest`           | Manually queue a BBB recording by URL. Requires `MANUAL_INGEST_ENABLED=true`. Body: `{ url, name? }`. |
+| `GET`    | `/insights/{id}/chapters.json` | Generated chapters in the player's shape (`[{ start, title }]`). 404 when none. |
+| `GET`    | `/insights/{id}`    | Full insights row for review: chapters incl. `gist`, model, prompt version, `skipReason`. |
+| `POST`   | `/insights/{id}/regenerate` | Delete the row and re-queue chapter generation.                    |
 | `*`      | `/api/inngest`      | Inngest function endpoint (registration + execution).             |
 
 ## Project structure
