@@ -25,7 +25,7 @@ import { inngest } from "../client";
 import { db, transcripts } from "../../lib/db";
 import { TRANSLATE_MODEL, WARM, assertModel, chat, unload } from "../../lib/ollama";
 import {
-  CUES_SCHEMA,
+  cuesSchema,
   TRANSLATE_PROMPT_VERSION,
   TRANSLATE_SYSTEM,
   type CuesOut,
@@ -45,7 +45,9 @@ async function translateBatch(texts: string[], from: string, to: string): Promis
     model: TRANSLATE_MODEL,
     system: TRANSLATE_SYSTEM(from, to),
     user: translateUser(texts),
-    schema: CUES_SCHEMA as unknown as Record<string, unknown>,
+    // Length-exact: the model cannot return a different number of cues than it
+    // was given, so alignment holds without the per-cue fallback.
+    schema: cuesSchema(texts.length) as unknown as Record<string, unknown>,
     numCtx: NUM_CTX,
     // WARM matters most here: a recording is ~100 batch calls, and reloading a
     // 19 GB model for each would cost ~12 minutes per recording in loading

@@ -6,13 +6,26 @@ export const TRANSLATE_PROMPT_VERSION = "v1";
  * is what makes cue alignment checkable: the reply either has exactly as many
  * entries as the batch had cues, or it is rejected.
  */
-export const CUES_SCHEMA = {
-  type: "object",
-  properties: {
-    cues: { type: "array", items: { type: "string" } },
-  },
-  required: ["cues"],
-} as const;
+/**
+ * Exactly `n` translated cues — no more, no fewer.
+ *
+ * The array length is part of the contract, not a hope. With an unbounded
+ * `items` schema the model routinely returned 36 cues for 37, or 27 for 29, and
+ * every one of those misses fell back to translating a cue per request: ~2700
+ * model calls for a recording instead of ~75, about 80 minutes each, which on a
+ * single GPU is weeks of work for the corpus. Constrained decoding enforces the
+ * count for free, so the fallback goes back to being the rare case it was meant
+ * to be.
+ */
+export function cuesSchema(n: number) {
+  return {
+    type: "object",
+    properties: {
+      cues: { type: "array", items: { type: "string" }, minItems: n, maxItems: n },
+    },
+    required: ["cues"],
+  } as const;
+}
 
 export type CuesOut = { cues: string[] };
 
