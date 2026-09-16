@@ -617,8 +617,13 @@ export const processRecording = inngest.createFunction(
           durationSeconds: result.durationSeconds,
           model: WHISPER_MODEL,
         })
+        // The unique index is (recording_id, language) — one transcript PER
+        // LANGUAGE, so a forced German re-run sits beside an imported wrong-
+        // language one instead of overwriting it. Targeting recording_id alone
+        // here raises "no unique or exclusion constraint matching the ON
+        // CONFLICT specification" and strands the recording in 'transcribing'.
         .onConflictDoUpdate({
-          target: transcripts.recordingId,
+          target: [transcripts.recordingId, transcripts.language],
           set: {
             text: result.text,
             vtt: result.vtt,

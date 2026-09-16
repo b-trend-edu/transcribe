@@ -369,3 +369,26 @@ const inngestHandler = serve({
 app.use("/api/inngest", async (c) => inngestHandler(c));
 
 export default app;
+
+// Register with the Inngest server on every boot. `inngest start` (self-hosted,
+// "cloud" mode) does NOT discover apps the way the dev server does: it keeps
+// whatever function list it last saw. Deploying an image that adds functions
+// therefore leaves them invisible — events for them are accepted and dropped —
+// until something sends a PUT to this endpoint. Seen 2026-09-14: summarize and
+// translate shipped, 4 of 8 functions registered, zero summaries for two days.
+async function registerWithInngest(attempt = 1): Promise<void> {
+  const port = Number(process.env.PORT ?? 3000);
+  try {
+    const res = await fetch(`http://localhost:${port}/api/inngest`, { method: "PUT" });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${body}`);
+    console.log(`[inngest] registered: ${body}`);
+  } catch (err) {
+    if (attempt >= 10) {
+      console.error(`[inngest] registration failed after ${attempt} attempts:`, err);
+      return;
+    }
+    setTimeout(() => registerWithInngest(attempt + 1), 3000 * attempt);
+  }
+}
+setTimeout(() => registerWithInngest(), 2000);
