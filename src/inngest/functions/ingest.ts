@@ -1,4 +1,5 @@
 import { inngest } from "../client";
+import { unloadAll } from "../../lib/ollama";
 import { NonRetriableError } from "inngest";
 import { db, recordings, transcripts } from "../../lib/db";
 import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
@@ -576,6 +577,12 @@ export const processRecording = inngest.createFunction(
         .set({ status: "transcribing", updatedAt: Math.floor(Date.now() / 1000) })
         .where(eq(recordings.id, recordingId));
 
+      // Take the card back before loading faster-whisper. The GPU lane stops
+      // another STEP from running, but a warm Ollama model stays resident in
+      // VRAM across steps and leaves too little for large-v3 — the OOM that
+      // failed 11 re-transcriptions on 2026-09-16.
+      await unloadAll();
+
       const e = getEnv();
       try {
         return await transcribe(audioPath, {
@@ -594,9 +601,15 @@ export const processRecording = inngest.createFunction(
         // specific to this recording — every retry re-runs the whole pipeline
         // (re-download + re-transcribe) and fails the same way, wasting minutes
         // per recording. Fail fast so the host gets fixed instead of thrashing.
+        //
+        // Out-of-memory is deliberately NOT in this list. It is contention, not
+        // a broken host: something else held VRAM at that moment. unloadAll()
+        // above removes the usual cause, and a retry is the right answer for
+        // whatever is left — treating it as terminal is what buried 11
+        // recordings in 'failed' with a message blaming the GPU.
         const msg = err instanceof Error ? err.message : String(err);
         if (
-          /\bcuda\b|cudnn|cublas|unsupported display driver|no CUDA-capable device|out of memory|nvidia/i.test(
+          /cudnn|cublas|unsupported display driver|no CUDA-capable device|nvidia-smi has failed/i.test(
             msg
           )
         ) {

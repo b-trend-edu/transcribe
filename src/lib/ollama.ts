@@ -139,6 +139,39 @@ export async function unload(model: string): Promise<void> {
   }
 }
 
+/**
+ * Evict every model Ollama currently holds in VRAM, and wait for the card to
+ * actually come back.
+ *
+ * WhisperX and Ollama share one 16 GB card. The Inngest GPU lane serialises
+ * *steps*, but it cannot make Ollama let go: with `keep_alive` warm, qwen3:30b
+ * stays resident (~15.3 GB) for ten minutes after its run ends, so the next
+ * transcription loads faster-whisper into a full card and dies with
+ * `CUDA failed with error out of memory`. That is how 11 re-transcriptions
+ * failed overnight on 2026-09-16 while the summary backfill was running.
+ *
+ * Unloading is asynchronous on Ollama's side, hence the poll: returning early
+ * would just move the OOM a second later.
+ */
+export async function unloadAll(timeoutMs = 60_000): Promise<void> {
+  const loaded = async (): Promise<string[]> => {
+    const res = await fetch(`${HOST}/api/ps`).catch(() => null);
+    if (!res?.ok) return [];
+    const { models = [] } = (await res.json()) as { models?: { name: string }[] };
+    return models.map((m) => m.name);
+  };
+
+  const names = await loaded();
+  if (names.length === 0) return;
+  await Promise.all(names.map((name) => unload(name)));
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await loaded()).length === 0) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 /** Fails fast with a clear message if the model tag is not pulled. */
 export async function assertModel(model: string): Promise<void> {
   const res = await fetch(`${HOST}/api/tags`).catch(() => null);
