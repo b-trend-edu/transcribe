@@ -57,6 +57,22 @@ services:
       # ignore  = re-transcribe everything (pre-existing behaviour)
       - EXISTING_CAPTIONS=${EXISTING_CAPTIONS:-import}
       - MANUAL_INGEST_ENABLED=${MANUAL_INGEST_ENABLED:-false}
+
+      # ---- derived-artifact publishing (summaries, chapters) ----
+      # Generated documents go straight to the recording bucket under
+      # presentation/<recordId>/meta/, which nginx on the BBB host proxies onto
+      # the player's origin. That is what makes publishing possible from here:
+      # no shell access to a production BBB host, no writes into the live
+      # /var/bigbluebutton/published share.
+      #
+      # Leave the keys unset and publishing is simply skipped — generation still
+      # runs and the rows are stored, so nothing is lost, it just is not visible
+      # until a key is configured and scripts/publish-derived.ts backfills.
+      - S3_ENDPOINT=${S3_ENDPOINT:-https://fsn1.your-objectstorage.com}
+      - S3_BUCKET=${S3_BUCKET:-s3-storage01}
+      - S3_REGION=${S3_REGION:-fsn1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - TRANSCRIBE_CONCURRENCY=1
 
       # ---- GPU ----

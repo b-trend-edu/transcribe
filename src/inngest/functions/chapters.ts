@@ -35,6 +35,7 @@ import {
   titlesSchema,
 } from "../../lib/chapters-prompt";
 import { cueStartSeconds, parseVtt } from "../../lib/vtt";
+import { disabledReason, enabled as s3Enabled, metaKey, putJson } from "../../lib/s3";
 
 const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 40960);
 const CHUNK_TOKENS = Math.floor(NUM_CTX * 0.6);
@@ -253,6 +254,18 @@ export const generateChapters = inngest.createFunction(
             },
           });
       }
+    });
+
+    // Same contract as summaries: the run that generates the chapters is the run
+    // that publishes them, to `meta/` on the bucket the player already reads.
+    await step.run("publish-to-s3", async () => {
+      if (!s3Enabled()) {
+        logger.info(`skipping publish for ${recordingId}: S3 ${disabledReason()}`);
+        return { published: false };
+      }
+      const key = await putJson(metaKey(recordingId, "chapters.json"), { de: german, en: english });
+      logger.info(`published ${key}`);
+      return { published: true, key };
     });
 
     await step.run("unload-model", () => unload(SUMMARY_MODEL).then(() => "released"));

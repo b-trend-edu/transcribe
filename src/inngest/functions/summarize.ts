@@ -17,6 +17,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { inngest } from "../client";
 import { db, recordings, summaries, transcripts } from "../../lib/db";
+import { disabledReason, enabled as s3Enabled, metaKey, putJson } from "../../lib/s3";
 import { SUMMARY_MODEL, WARM, approxTokens, assertModel, chat, unload } from "../../lib/ollama";
 import {
   CHUNK_SYSTEM,
@@ -179,6 +180,29 @@ export const summarizeRecording = inngest.createFunction(
       });
       written.push(lang);
     }
+
+    // Publish straight to the bucket. The player reads this file over the same
+    // nginx origin as every other derived artifact, so the run that generates a
+    // summary is the run that makes it visible — no hand-run copy step, and no
+    // shell access to a production BBB host from here.
+    //
+    // Both languages go in one document because the player fetches one file and
+    // falls back between languages itself.
+    await step.run("publish-to-s3", async () => {
+      if (!s3Enabled()) {
+        logger.info(`skipping publish for ${recordingId}: S3 ${disabledReason()}`);
+        return { published: false };
+      }
+      const rows = await db
+        .select({ language: summaries.language, title: summaries.title, summary: summaries.summary })
+        .from(summaries)
+        .where(eq(summaries.recordingId, recordingId));
+      const doc: Record<string, { title: string; summary: string }> = {};
+      for (const row of rows) doc[row.language] = { title: row.title, summary: row.summary };
+      const key = await putJson(metaKey(recordingId, "summary.json"), doc);
+      logger.info(`published ${key}`);
+      return { published: true, key };
+    });
 
     // Release the 19 GB before anything else wants the card. Not in a finally:
     // a failed run is retried and will reload anyway, and Ollama drops the model
