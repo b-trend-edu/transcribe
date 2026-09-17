@@ -99,3 +99,25 @@ export function batchCues(cues: Cue[], maxChars: number): { start: number; cues:
   if (current.length) batches.push({ start, cues: current });
   return batches;
 }
+
+/**
+ * Start time of a cue, in seconds.
+ *
+ * Read-only on purpose. The rule above — timestamps are copied verbatim, never
+ * re-rendered — is about *writing* a VTT. Chapter detection needs to know where
+ * a cue sits on the timeline, so it parses the value without ever writing one
+ * back.
+ *
+ * Accepts both WebVTT forms: `HH:MM:SS.mmm` and the short `MM:SS.mmm`.
+ * Anything unparseable returns NaN, which the caller drops.
+ */
+export function cueStartSeconds(timing: string): number {
+  const stamp = timing.split(TIMING)[0]?.trim();
+  if (!stamp) return NaN;
+  const parts = stamp.split(":");
+  if (parts.length < 2 || parts.length > 3) return NaN;
+  const [h, m, s] =
+    parts.length === 3 ? parts : ["0", parts[0]!, parts[1]!];
+  const seconds = Number(h) * 3600 + Number(m) * 60 + Number(String(s).replace(",", "."));
+  return Number.isFinite(seconds) ? seconds : NaN;
+}

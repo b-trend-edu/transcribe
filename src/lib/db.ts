@@ -89,3 +89,36 @@ export type Summary = typeof summaries.$inferSelect;
 
 const client = postgres(process.env.DATABASE_URL ?? "postgres://inngest:password@localhost:5432/transcribe");
 export const db = drizzle(client, { schema: { recordings, transcripts, summaries } });
+
+// Generated chapters, one row per (recording, language).
+//
+// Mirrors `summaries` deliberately: same key, same regeneration story. The
+// chapter LIST is stored as JSON text rather than a row per chapter — it is
+// always read and written whole (the player fetches one file per recording), so
+// a child table would buy nothing and cost a join on every read.
+//
+// Boundaries are identical across languages by construction: they are chosen
+// once from the German transcript and only the titles are translated. Storing
+// per language still matters, because the titles differ — and it keeps the
+// publish step symmetrical with summaries.
+export const chapters = pgTable(
+  "chapters",
+  {
+    id: serial("id").primaryKey(),
+    recordingId: text("recording_id")
+      .notNull()
+      .references(() => recordings.id),
+    language: text("language").notNull(),
+    /** JSON: `[{ "start": 0, "title": "Einführung" }, …]`, start in seconds. */
+    chapters: text("chapters").notNull(),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    createdAt: integer("created_at").default(sql`extract(epoch from now())::integer`),
+  },
+  (t) => ({
+    recordingLanguage: uniqueIndex("chapters_recording_language_idx").on(
+      t.recordingId,
+      t.language
+    ),
+  })
+);
