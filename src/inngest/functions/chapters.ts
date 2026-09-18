@@ -182,30 +182,50 @@ export const generateChapters = inngest.createFunction(
       logger.info(`${recordingId}: ${blocks.length} blocks in ${groups.length} chunk(s)`);
       const found: { start: number; title: string }[] = [];
 
-      for (const group of groups) {
+      for (const [groupIndex, group] of groups.entries()) {
         const span = (group[group.length - 1]!.start - group[0]!.start) || 1;
         const max = Math.max(1, Math.min(12, Math.round(span / TARGET_CHAPTER_SECONDS) + 1));
+
+        // Every chunk is numbered from 0, NOT continued from the previous one.
+        //
+        // Global numbering looked tidier and silently lost whole chunks: shown
+        // blocks [150]-[220], the model answers 1, 2, 3 anyway, the validator
+        // correctly rejects those as out of range, and that chunk contributes
+        // nothing. Chunk 1 always survived because its range starts at 0, so a
+        // 4-hour recording ended up with chapters only in its first hour — 4 of
+        // the first 20 recordings came out that way.
+        //
+        // Local numbering removes the failure instead of detecting it: the
+        // answer the model tends to give is now the correct one, and an index
+        // it invents is still out of range and still dropped.
+        const local = group.map((block, i) => ({ ...block, index: i }));
         const result = await chat<ChaptersOut>({
           model: SUMMARY_MODEL,
           system: CHAPTERS_SYSTEM,
-          user: chaptersUser(group, source.meetingName),
+          user: chaptersUser(local, source.meetingName),
           schema: chaptersSchema(1, max) as unknown as Record<string, unknown>,
           numCtx: NUM_CTX,
           keepAlive: WARM,
         });
 
-        // The index must be one this chunk actually offered. Anything else is
-        // invented; dropping it costs a chapter, keeping it costs trust in the
-        // seek bar.
-        const lowest = group[0]!.index;
-        const highest = group[group.length - 1]!.index;
+        let kept = 0;
         for (const chapter of result.chapters ?? []) {
-          if (!Number.isInteger(chapter.index) || chapter.index < lowest || chapter.index > highest) {
-            logger.warn(`${recordingId}: dropped out-of-range index ${chapter.index}`);
+          if (!Number.isInteger(chapter.index) || chapter.index < 0 || chapter.index >= group.length) {
+            logger.warn(`${recordingId}: chunk ${groupIndex} dropped out-of-range index ${chapter.index}`);
             continue;
           }
-          const block = blocks[chapter.index];
-          if (block) found.push({ start: block.start, title: String(chapter.title ?? "") });
+          const block = group[chapter.index];
+          if (block) {
+            found.push({ start: block.start, title: String(chapter.title ?? "") });
+            kept++;
+          }
+        }
+        // A chunk contributing nothing is how the coverage gap hid. Say so.
+        if (kept === 0) {
+          logger.warn(
+            `${recordingId}: chunk ${groupIndex} (${Math.round(group[0]!.start / 60)}-` +
+              `${Math.round(group[group.length - 1]!.start / 60)}min) produced no usable chapters`
+          );
         }
       }
       return normalise(found, duration);

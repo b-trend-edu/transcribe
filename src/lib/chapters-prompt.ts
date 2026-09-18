@@ -14,7 +14,7 @@
  */
 
 /** Bump when a prompt changes; the sweep regenerates anything older. */
-export const CHAPTERS_PROMPT_VERSION = "v1";
+export const CHAPTERS_PROMPT_VERSION = "v2";
 
 /** A block of transcript offered to the model as one candidate boundary. */
 export interface Block {
