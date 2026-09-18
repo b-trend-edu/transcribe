@@ -48,6 +48,23 @@ export function buildWebcamsUrl(
   return `${origin}/presentation/${recordId}/video/webcams.${ext}`;
 }
 
+/**
+ * Media URL for a recording published in the `video` format.
+ *
+ * buildWebcamsUrl assumes the `presentation` format layout
+ * (/presentation/<id>/video/webcams.*), which is what 371 of 372 recordings
+ * here use. The `video` format publishes somewhere else entirely — the media
+ * sits next to its own playback page as video-0.m4v — so a video-format
+ * recording 404s on every presentation-shaped guess and lands in 'failed' with
+ * "Could not download recording media", although the file is right there.
+ *
+ * Derived from the playback URL rather than assumed, because that URL is the
+ * one thing BBB actually told us about this recording.
+ */
+export function buildVideoFormatUrl(playbackUrl: string): string {
+  return `${playbackUrl.replace(/\/+$/, "")}/video-0.m4v`;
+}
+
 const bbbRecordingSchema = z.object({
   recordID: z.coerce.string(),
   meetingID: z.coerce.string(),

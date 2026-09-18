@@ -2,7 +2,7 @@ import { inngest } from "../client";
 import { unloadAll } from "../../lib/ollama";
 import { NonRetriableError } from "inngest";
 import { db, recordings, transcripts } from "../../lib/db";
-import { fetchRecordings, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
+import { fetchRecordings, buildVideoFormatUrl, buildWebcamsUrl, uploadCaptionTrack } from "../../lib/bbb";
 import { findExistingCaption, captionMode } from "../../lib/existing-captions";
 import { transcribe, cleanupOldTempFiles, TEMP_DIR } from "../../lib/whisper";
 import { resolveLocalMedia, listLocalRecordingIds, readLocalRecording } from "../../lib/media";
@@ -518,6 +518,10 @@ export const processRecording = inngest.createFunction(
       const candidates: Array<["webm" | "mp4", string]> = [
         ["webm", buildWebcamsUrl(videoUrl, recordingId, "webm")],
         ["mp4", buildWebcamsUrl(videoUrl, recordingId, "mp4")],
+        // Last: a recording published in the `video` format, whose media sits
+        // beside its own playback page instead of under /presentation/. Tried
+        // last so the common layout still costs two requests, not three.
+        ["mp4", buildVideoFormatUrl(videoUrl)],
       ];
 
       let lastStatus = 0;
