@@ -23,6 +23,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { inngest } from "../client";
 import { db, transcripts } from "../../lib/db";
+import { uploadCaptionTrack } from "../../lib/bbb";
 import { TRANSLATE_MODEL, WARM, assertModel, chat, unload } from "../../lib/ollama";
 import {
   cuesSchema,
@@ -32,6 +33,15 @@ import {
   translateUser,
 } from "../../lib/translate-prompt";
 import { batchCues, cuesToText, parseVtt, serialiseVtt, type Cue } from "../../lib/vtt";
+
+/** Human label for a language code, e.g. "en" -> "English"; falls back to the code. */
+function languageLabel(lang: string): string {
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(lang) ?? lang;
+  } catch {
+    return lang;
+  }
+}
 
 const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 40960);
 /** Chars of cue text per request. Small enough to leave room for the reply,
@@ -149,8 +159,11 @@ export const translateRecording = inngest.createFunction(
       });
     }
 
+    // Serialised once, outside the step, so the publish step below can send the
+    // same bytes that were stored rather than rebuilding them.
+    const vtt = serialiseVtt(header, translated);
+
     await step.run("store", async () => {
-      const vtt = serialiseVtt(header, translated);
       await db
         .insert(transcripts)
         .values({
@@ -170,6 +183,47 @@ export const translateRecording = inngest.createFunction(
             createdAt: sql`extract(epoch from now())::integer`,
           },
         });
+    });
+
+    // Publish the track to BBB, exactly as transcription does for the German
+    // one.
+    //
+    // Without this the English VTT only ever existed in our database: BBB kept
+    // serving a single German track, so captions.json listed one language, the
+    // player's transcript language selector never appeared (it needs two), and
+    // the on-video captions had nothing to switch to. Translating without
+    // publishing produces a row nobody can read.
+    await step.run("publish-captions", async () => {
+      if (process.env.PUBLISH_CAPTIONS === "false") return { skipped: "disabled" };
+      const baseUrl = process.env.BBB_BASE_URL;
+      const secret = process.env.BBB_SHARED_SECRET;
+      if (!baseUrl || !secret) return { skipped: "no BBB credentials" };
+      if (!vtt.trim()) return { skipped: "empty vtt" };
+
+      try {
+        const res = await uploadCaptionTrack(
+          baseUrl,
+          secret,
+          recordingId,
+          TARGET,
+          languageLabel(TARGET),
+          vtt
+        );
+        if (!res.success) {
+          logger.warn(
+            { recordingId, lang: TARGET, status: res.status, message: res.message },
+            "caption upload rejected by BBB"
+          );
+          return { published: false };
+        }
+        logger.info(`${recordingId}: published ${TARGET} caption track`);
+        return { published: true };
+      } catch (err) {
+        // Best effort: the transcript is already stored, so a BBB hiccup must
+        // not throw away the translation work that produced it.
+        logger.warn({ recordingId, err }, "caption upload failed");
+        return { published: false };
+      }
     });
 
     await step.run("unload-model", () => unload(TRANSLATE_MODEL).then(() => "released"));
