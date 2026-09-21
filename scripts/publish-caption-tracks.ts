@@ -36,6 +36,8 @@ const LANG = flag("lang");
 const LIMIT = Number(flag("limit") ?? 0) || 0;
 
 const BASE = process.env.BBB_BASE_URL;
+/** Where recordings are SERVED, to check a recording exists before uploading to it. */
+const MEDIA_ROOT = (process.env.BBB_MEDIA_ROOT ?? (BASE ?? "").replace(/\/bigbluebutton\/?$/, "")) + "/presentation";
 const SECRET = process.env.BBB_SHARED_SECRET;
 
 function languageLabel(lang: string): string {
@@ -59,9 +61,21 @@ async function main() {
 
   const wanted = rows.filter((r) => r.vtt?.trim() && (!LANG || r.language === LANG));
 
-  let uploaded = 0, present = 0, failed = 0, n = 0;
+  let uploaded = 0, present = 0, failed = 0, missing = 0, n = 0;
   for (const row of wanted) {
     if (LIMIT && n++ >= LIMIT) break;
+
+    // Skip recordings with no published folder on this server.
+    //
+    // BBB accepts the upload regardless, then its caption inbox tries to write
+    // captions.json into a directory that does not exist, raises ENOENT, and
+    // dies — taking down caption processing for every other recording until
+    // someone clears the stray file by hand. Uploading a track for a recording
+    // that is not here is never useful, so check first.
+    const head = await fetch(`${MEDIA_ROOT}/${row.recordingId}/metadata.xml`, { method: "HEAD" })
+      .then((r) => r.ok)
+      .catch(() => false);
+    if (!head) { missing++; continue; }
 
     // Ask BBB what it already serves rather than assuming — re-uploading an
     // existing track is wasted work and an unnecessary write to production.
@@ -88,7 +102,7 @@ async function main() {
     }
   }
 
-  console.log(`\nuploaded: ${uploaded}   already on BBB: ${present}   failed: ${failed}`);
+  console.log(`\nuploaded: ${uploaded}   already on BBB: ${present}   not published here: ${missing}   failed: ${failed}`);
   if (!COMMIT) console.log("DRY RUN — nothing uploaded. Re-run with --commit.");
   process.exit(0);
 }
