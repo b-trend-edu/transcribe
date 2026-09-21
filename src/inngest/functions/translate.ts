@@ -45,16 +45,28 @@ function languageLabel(lang: string): string {
 
 const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 40960);
 /** Chars of cue text per request. Small enough to leave room for the reply,
- *  large enough that a 4-hour recording is ~100 requests rather than ~4000. */
-const BATCH_CHARS = Number(process.env.TRANSLATE_BATCH_CHARS ?? 2500);
+ *  large enough that a 4-hour recording is ~100 requests rather than ~4000.
+ *  Raised from 2500: a bigger batch is more speech in one view, which is what
+ *  lets the model resolve a pronoun to the noun three cues earlier. */
+const BATCH_CHARS = Number(process.env.TRANSLATE_BATCH_CHARS ?? 6000);
+/** Neighbouring cues sent as reference either side of a batch. They are never
+ *  translated; they exist so the first and last cues of a batch are not read
+ *  blind, which is where pronoun and terminology errors concentrated. */
+const CONTEXT_CUES = Number(process.env.TRANSLATE_CONTEXT_CUES ?? 8);
 
 const MODEL_TAG = `translated:${TRANSLATE_MODEL}:${TRANSLATE_PROMPT_VERSION}`;
 
-async function translateBatch(texts: string[], from: string, to: string): Promise<string[]> {
+async function translateBatch(
+  texts: string[],
+  from: string,
+  to: string,
+  contextBefore: string[] = [],
+  contextAfter: string[] = [],
+): Promise<string[]> {
   const out = await chat<CuesOut>({
     model: TRANSLATE_MODEL,
     system: TRANSLATE_SYSTEM(from, to),
-    user: translateUser(texts),
+    user: translateUser(texts, contextBefore, contextAfter),
     // Length-exact: the model cannot return a different number of cues than it
     // was given, so alignment holds without the per-cue fallback.
     schema: cuesSchema(texts.length) as unknown as Record<string, unknown>,
@@ -71,9 +83,10 @@ async function translateBatch(texts: string[], from: string, to: string): Promis
 /** Exact count or nothing. Falls back to one cue per request, which cannot
  *  misalign, rather than accepting a batch that lost or gained a line. */
 async function translateAligned(
-  texts: string[], from: string, to: string, log: (m: string) => void
+  texts: string[], from: string, to: string, log: (m: string) => void,
+  contextBefore: string[] = [], contextAfter: string[] = [],
 ): Promise<string[]> {
-  const first = await translateBatch(texts, from, to).catch((e) => {
+  const first = await translateBatch(texts, from, to, contextBefore, contextAfter).catch((e) => {
     log(`batch failed (${(e as Error).message}), falling back to per-cue`);
     return null;
   });
@@ -83,7 +96,9 @@ async function translateAligned(
   const one: string[] = [];
   for (const text of texts) {
     if (!text.trim()) { one.push(""); continue; }
-    const r = await translateBatch([text], from, to);
+    // The fallback gets context as well: translating a lone fragment with no
+    // neighbours is exactly the blind case this whole change is about.
+    const r = await translateBatch([text], from, to, contextBefore, contextAfter);
     one.push(r[0] ?? text);
   }
   return one;
@@ -144,12 +159,24 @@ export const translateRecording = inngest.createFunction(
     // recording resumes where it stopped instead of re-translating from cue 1.
     const translated: Cue[] = [...cues];
     for (const [i, batch] of batches.entries()) {
+      // Context comes from the ORIGINAL cues, not the translated ones: the
+      // model is reading German to understand German, and a half-finished
+      // English rendering would be worse reference than the source.
+      const before = cues
+        .slice(Math.max(0, batch.start - CONTEXT_CUES), batch.start)
+        .map((c) => c.text.replace(/\n/g, " "));
+      const after = cues
+        .slice(batch.start + batch.cues.length, batch.start + batch.cues.length + CONTEXT_CUES)
+        .map((c) => c.text.replace(/\n/g, " "));
+
       const texts = await step.run(`translate-${i}`, async () =>
         translateAligned(
           batch.cues.map((c) => c.text.replace(/\n/g, " ")),
           source.language ?? "de",
           TARGET,
-          (m) => logger.warn(`${recordingId} batch ${i}: ${m}`)
+          (m) => logger.warn(`${recordingId} batch ${i}: ${m}`),
+          before,
+          after
         )
       );
       texts.forEach((text, j) => {
