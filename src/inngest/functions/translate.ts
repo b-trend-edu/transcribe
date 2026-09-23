@@ -120,12 +120,34 @@ async function translateAligned(
   return one;
 }
 
+/** One LLM batch on the shared GPU lane. Invoked per batch by translateRecording,
+ *  so only the gemma fallback waits its turn behind WhisperX and summaries. */
+export const translateLlmBatch = inngest.createFunction(
+  {
+    id: "bbb/translate.llm-batch",
+    concurrency: [{ scope: "account", key: '"gpu"', limit: 1 }],
+    retries: 2,
+    triggers: [{ event: "bbb/translate.llm-batch" }],
+  },
+  async ({ event, logger }) => {
+    const d = event.data as {
+      label: string; texts: string[]; from: string; to: string; before: string[]; after: string[];
+    };
+    return translateAligned(d.texts, d.from, d.to, (m) => logger.warn(`${d.label}: ${m}`), d.before, d.after);
+  }
+);
+
 export const translateRecording = inngest.createFunction(
   {
     id: "bbb/translate",
+    // NOT on the shared "gpu" lane. The MT model needs well under 1 GB of VRAM
+    // and finishes in seconds; on the lane, each job waited behind multi-minute
+    // gemma steps from summaries and chapters. Its own lane of one keeps two MT
+    // runs from stacking; the LLM fallback batches go through translateLlmBatch,
+    // which IS on the gpu lane.
     concurrency: [
       { key: "event.data.recordingId", limit: 1 },
-      { scope: "account", key: '"gpu"', limit: 1 },
+      { scope: "account", key: '"mt"', limit: 1 },
     ],
     retries: 2,
     triggers: [{ event: "bbb/translate" }],
@@ -207,16 +229,18 @@ export const translateRecording = inngest.createFunction(
           .slice(batch.start + batch.cues.length, batch.start + batch.cues.length + CONTEXT_CUES)
           .map((c) => c.text.replace(/\n/g, " "));
 
-        const texts = await step.run(`translate-${i}`, async () =>
-          translateAligned(
-            batch.cues.map((c) => c.text.replace(/\n/g, " ")),
-            FROM,
-            TARGET,
-            (m) => logger.warn(`${recordingId} batch ${i}: ${m}`),
+        const texts: string[] = await step.invoke(`translate-${i}`, {
+          function: translateLlmBatch,
+          data: {
+            label: `${recordingId} batch ${i}`,
+            texts: batch.cues.map((c) => c.text.replace(/\n/g, " ")),
+            from: FROM,
+            to: TARGET,
             before,
-            after
-          )
-        );
+            after,
+          },
+          timeout: "3h",
+        });
         texts.forEach((text, j) => {
           const idx = batch.start + j;
           const original = cues[idx]!;

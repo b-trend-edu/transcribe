@@ -6,7 +6,7 @@ import { serve } from "inngest/hono";
 import { inngest } from "./inngest/client";
 import { sweep, scanRecordings, processRecording } from "./inngest/functions/ingest";
 import { summarizeRecording, summarizeSweep } from "./inngest/functions/summarize";
-import { translateRecording, translateSweep } from "./inngest/functions/translate";
+import { translateLlmBatch, translateRecording, translateSweep } from "./inngest/functions/translate";
 import { generateChapters, chaptersSweep } from "./inngest/functions/chapters";
 import { db, recordings, transcripts } from "./lib/db";
 import pinoLogger from "./lib/logger";
@@ -367,7 +367,7 @@ const inngestHandler = serve({
   functions: [
     sweep, scanRecordings, processRecording,
     summarizeRecording, summarizeSweep,
-    translateRecording, translateSweep,
+    translateRecording, translateSweep, translateLlmBatch,
     generateChapters, chaptersSweep,
   ],
 });
