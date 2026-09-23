@@ -38,6 +38,20 @@ RUN pip install --upgrade pip \
         torch==2.8.0 torchaudio==2.8.0 \
     && pip install "whisperx==3.8.6"
 
+# ---- Translation models (OPUS-MT via CTranslate2, see src/lib/mt.ts) ----------
+# CTranslate2 is already here for faster-whisper; this adds the tokenizer and
+# converts de<->en to int8. Baked into /opt/mt, NOT /models: /models is a named
+# volume on ai01, and an already-populated volume never sees newly baked files.
+# Runs before HF_HOME is pointed at /models, so the HF download cache stays in
+# /root/.cache and is deleted in the same layer.
+RUN pip install sentencepiece \
+    && for pair in de-en en-de; do \
+        ct2-transformers-converter --model "Helsinki-NLP/opus-mt-${pair}" \
+            --output_dir "/opt/mt/opus-mt-${pair}" --quantization int8 \
+            --copy_files source.spm target.spm || exit 1; \
+    done \
+    && rm -rf /root/.cache/huggingface
+
 # ---- Pre-bake the Whisper large-v3 ASR weights into /models -------------------
 # A *fresh/empty* named volume mounted at /models is seeded from these baked
 # files on first start; an already-populated volume keeps its own contents.
@@ -95,6 +109,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the Python venv, baked models, bun, and the app from the builder.
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /models /models
+COPY --from=builder /opt/mt /opt/mt
 COPY --from=builder /usr/local/bun /usr/local/bun
 COPY --from=builder /app /app
 

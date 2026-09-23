@@ -7,12 +7,11 @@
  *   timestamp, so the result drops straight into the player's caption menu next
  *   to the German one.
  *
- * THE EXPENSIVE ONE
- *   Summarisation writes ~500 tokens; this writes a whole transcript — roughly
- *   60k output tokens for a 4-hour recording, ~10 minutes on this GPU. Across
- *   the corpus that is days, not hours. It therefore runs on the same serialised
- *   GPU lane as everything else, in small sweeps, and is expected to take a
- *   long time. That is not a bug to optimise away.
+ * TWO ENGINES
+ *   de<->en goes through a dedicated OPUS-MT model (lib/mt.ts): one step, well
+ *   under a minute per recording. Through gemma4 the same recording was ~120
+ *   batch calls and ~2 hours on the shared GPU — weeks for the backlog. The LLM
+ *   path remains for pairs with no baked model, and via TRANSLATE_ENGINE=llm.
  *
  * ALIGNMENT IS THE CORRECTNESS PROPERTY
  *   A translated track whose cues drifted is worse than no track: it looks right
@@ -24,6 +23,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { inngest } from "../client";
 import { db, transcripts } from "../../lib/db";
 import { uploadCaptionTrack } from "../../lib/bbb";
+import { mtAvailable, mtModelTag, translateCues } from "../../lib/mt";
 import { TRANSLATE_MODEL, WARM, assertModel, chat, unload } from "../../lib/ollama";
 import {
   cuesSchema,
@@ -163,43 +163,61 @@ export const translateRecording = inngest.createFunction(
     }
     if (source.done) return { skipped: "already-translated", target: source.target };
     const TARGET = source.target;
-
-    await step.run("assert-model", () => assertModel(TRANSLATE_MODEL));
+    const FROM = source.language ?? "de";
 
     const { header, cues } = parseVtt(source.vtt!);
     if (!cues.length) return { skipped: "no-cues" };
-    const batches = batchCues(cues, BATCH_CHARS);
-    logger.info(`${recordingId}: ${cues.length} cues in ${batches.length} batches`);
 
-    // One step per batch: Inngest checkpoints each, so a retry on a multi-hour
-    // recording resumes where it stopped instead of re-translating from cue 1.
+    // Dedicated MT model when one is baked in for this pair: the whole recording
+    // in one step, well under a minute. The LLM loop below is the fallback.
+    const useMt = mtAvailable(FROM, TARGET);
+    const modelTag = useMt ? mtModelTag(FROM, TARGET) : MODEL_TAG;
     const translated: Cue[] = [...cues];
-    for (const [i, batch] of batches.entries()) {
-      // Context comes from the ORIGINAL cues, not the translated ones: the
-      // model is reading German to understand German, and a half-finished
-      // English rendering would be worse reference than the source.
-      const before = cues
-        .slice(Math.max(0, batch.start - CONTEXT_CUES), batch.start)
-        .map((c) => c.text.replace(/\n/g, " "));
-      const after = cues
-        .slice(batch.start + batch.cues.length, batch.start + batch.cues.length + CONTEXT_CUES)
-        .map((c) => c.text.replace(/\n/g, " "));
 
-      const texts = await step.run(`translate-${i}`, async () =>
-        translateAligned(
-          batch.cues.map((c) => c.text.replace(/\n/g, " ")),
-          source.language ?? "de",
-          TARGET,
-          (m) => logger.warn(`${recordingId} batch ${i}: ${m}`),
-          before,
-          after
-        )
-      );
-      texts.forEach((text, j) => {
-        const idx = batch.start + j;
-        const original = cues[idx]!;
-        translated[idx] = { ...original, text: text.trim() || original.text };
+    if (useMt) {
+      const texts = await step.run("translate-mt", async () => {
+        const r = await translateCues(cues.map((c) => c.text.replace(/\n/g, " ")), FROM, TARGET);
+        logger.info(`${recordingId}: ${cues.length} cues ${FROM}->${TARGET} on ${r.device} in ${r.seconds}s`);
+        return r.texts;
       });
+      texts.forEach((text, idx) => {
+        translated[idx] = { ...cues[idx]!, text: text.trim() || cues[idx]!.text };
+      });
+    } else {
+      await step.run("assert-model", () => assertModel(TRANSLATE_MODEL));
+
+      const batches = batchCues(cues, BATCH_CHARS);
+      logger.info(`${recordingId}: ${cues.length} cues in ${batches.length} batches`);
+
+      // One step per batch: Inngest checkpoints each, so a retry on a multi-hour
+      // recording resumes where it stopped instead of re-translating from cue 1.
+      for (const [i, batch] of batches.entries()) {
+        // Context comes from the ORIGINAL cues, not the translated ones: the
+        // model is reading German to understand German, and a half-finished
+        // English rendering would be worse reference than the source.
+        const before = cues
+          .slice(Math.max(0, batch.start - CONTEXT_CUES), batch.start)
+          .map((c) => c.text.replace(/\n/g, " "));
+        const after = cues
+          .slice(batch.start + batch.cues.length, batch.start + batch.cues.length + CONTEXT_CUES)
+          .map((c) => c.text.replace(/\n/g, " "));
+
+        const texts = await step.run(`translate-${i}`, async () =>
+          translateAligned(
+            batch.cues.map((c) => c.text.replace(/\n/g, " ")),
+            FROM,
+            TARGET,
+            (m) => logger.warn(`${recordingId} batch ${i}: ${m}`),
+            before,
+            after
+          )
+        );
+        texts.forEach((text, j) => {
+          const idx = batch.start + j;
+          const original = cues[idx]!;
+          translated[idx] = { ...original, text: text.trim() || original.text };
+        });
+      }
     }
 
     // Serialised once, outside the step, so the publish step below can send the
@@ -215,14 +233,14 @@ export const translateRecording = inngest.createFunction(
           text: cuesToText(translated),
           vtt,
           durationSeconds: source.duration,
-          model: MODEL_TAG,
+          model: modelTag,
         })
         .onConflictDoUpdate({
           target: [transcripts.recordingId, transcripts.language],
           set: {
             text: cuesToText(translated),
             vtt,
-            model: MODEL_TAG,
+            model: modelTag,
             createdAt: sql`extract(epoch from now())::integer`,
           },
         });
@@ -269,21 +287,23 @@ export const translateRecording = inngest.createFunction(
       }
     });
 
-    await step.run("unload-model", () => unload(TRANSLATE_MODEL).then(() => "released"));
+    if (!useMt) {
+      await step.run("unload-model", () => unload(TRANSLATE_MODEL).then(() => "released"));
+    }
 
-    return { recordingId, from: source.language, to: TARGET, cues: cues.length, batches: batches.length };
+    return { recordingId, from: FROM, to: TARGET, cues: cues.length, engine: useMt ? "mt" : "llm" };
   }
 );
 
 /**
- * Backfill sweep. Deliberately tiny: each recording is ~10 GPU-minutes, the lane
- * is serialised, and this must never crowd out transcription or summarisation.
- * Newest first, on the assumption that recent courses are the ones being viewed.
+ * Backfill sweep. Newest first, on the assumption that recent courses are the
+ * ones being viewed. With the MT engine a recording is under a minute, so the
+ * batch can be large without crowding out transcription or summarisation.
  */
 export const translateSweep = inngest.createFunction(
   { id: "bbb/translate.sweep", triggers: [{ cron: "15 * * * *" }] },
   async ({ step, logger }) => {
-    const batch = Number(process.env.TRANSLATE_BATCH ?? 3);
+    const batch = Number(process.env.TRANSLATE_BATCH ?? 30);
     const pending = await step.run("find-missing", async () => {
       const rows = await db.execute(sql`
         SELECT src.recording_id AS id
