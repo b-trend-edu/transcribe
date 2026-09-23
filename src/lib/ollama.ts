@@ -75,10 +75,23 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await fetch(`${HOST}/api/chat`, {
+    // `timeout: false` is a Bun extension that this version does not declare in
+    // BunFetchRequestInit, so the cast is deliberate rather than a silenced
+    // error: the option is accepted at runtime (verified against the running
+    // container), it is simply missing from the types.
+    const init = {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: ctl.signal,
+      // Bun applies its OWN fetch timeout on top of the AbortController above,
+      // and that one fired first: every translate batch died with
+      // `TimeoutError: The operation timed out` while the 60-minute abort sat
+      // unused. Not because inference is slow — because Ollama serialises
+      // requests, so a batch waits behind whatever else is on the card.
+      // Measured 2026-09-22: a trivial "say ok" prompt took 156s to return.
+      // Disabling it leaves the AbortController as the only deadline, which is
+      // the one that knows how long this work legitimately takes.
+      timeout: false,
       body: JSON.stringify({
         model,
         stream: false,
@@ -90,7 +103,9 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
           { role: "user", content: user },
         ],
       }),
-    });
+    } satisfies Record<string, unknown>;
+
+    res = await fetch(`${HOST}/api/chat`, init as unknown as RequestInit);
   } catch (e) {
     throw new OllamaError(
       `ollama ${model} unreachable at ${HOST}: ${(e as Error).name} ${(e as Error).message}`

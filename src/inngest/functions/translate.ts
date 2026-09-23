@@ -86,10 +86,26 @@ async function translateAligned(
   texts: string[], from: string, to: string, log: (m: string) => void,
   contextBefore: string[] = [], contextAfter: string[] = [],
 ): Promise<string[]> {
-  const first = await translateBatch(texts, from, to, contextBefore, contextAfter).catch((e) => {
-    log(`batch failed (${(e as Error).message}), falling back to per-cue`);
+  // A failed request is NOT a misalignment, and must not be treated as one.
+  //
+  // Every batch was dying on a fetch timeout and dropping straight into the
+  // per-cue path: ~40 separate requests where one would do, each of which could
+  // time out in turn. That is how translation came to spend 40 minutes of every
+  // hour producing nothing. Retry the batch once — the fallback exists for a
+  // model that returns the wrong number of cues, which retrying cannot fix.
+  const attempt = async () =>
+    translateBatch(texts, from, to, contextBefore, contextAfter);
+
+  let first = await attempt().catch((e) => {
+    log(`batch failed (${(e as Error).message}), retrying once`);
     return null;
   });
+  if (!first) {
+    first = await attempt().catch((e) => {
+      log(`batch failed again (${(e as Error).message}), falling back to per-cue`);
+      return null;
+    });
+  }
   if (first && first.length === texts.length) return first;
   if (first) log(`batch returned ${first.length} cues for ${texts.length}, falling back to per-cue`);
 
