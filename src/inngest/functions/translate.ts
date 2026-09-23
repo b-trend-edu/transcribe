@@ -150,7 +150,12 @@ export const translateRecording = inngest.createFunction(
       const have = new Set(rows.map((r) => r.language));
       const target = event.data.target ?? (have.has("de") ? "en" : "de");
       if (have.has(target) && !force) return { done: true as const, target };
-      const from = rows.find((r) => r.language !== target && r.vtt) ?? null;
+      // Prefer a source the MT model can take. Two recordings carry both our
+      // German transcript and an imported pt/uk track; picking the imported one
+      // sent them down the LLM path — ~90 minutes each, holding the GPU lane
+      // while hundreds of seconds-long MT jobs queued behind them.
+      const candidates = rows.filter((r) => r.language !== target && r.vtt);
+      const from = candidates.find((r) => mtAvailable(r.language, target)) ?? candidates[0] ?? null;
       return from ? { done: false as const, target, ...from } : null;
     });
 
