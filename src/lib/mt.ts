@@ -36,8 +36,24 @@ export function mtAvailable(from: string, to: string): boolean {
   return existsSync(join(MODELS_DIR, modelName(from, to), "model.bin"));
 }
 
+// One MT process at a time, enforced here rather than trusted to Inngest: on
+// 2026-09-23 the "mt" concurrency key did not hold, ~100 translate.py processes
+// started at once, and the 12 GB container was OOM-killed over and over. Each
+// run is seconds, so a queue in front of the spawn costs nothing.
+let lane: Promise<unknown> = Promise.resolve();
+
 /** Translate cue texts one-to-one. The result has exactly `texts.length` entries. */
-export async function translateCues(
+export function translateCues(
+  texts: string[],
+  from: string,
+  to: string,
+): Promise<{ texts: string[]; device: string; seconds: number }> {
+  const run = lane.then(() => spawnTranslate(texts, from, to));
+  lane = run.catch(() => undefined);
+  return run;
+}
+
+async function spawnTranslate(
   texts: string[],
   from: string,
   to: string,
