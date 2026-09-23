@@ -96,6 +96,11 @@ export async function chat<T = unknown>(opts: ChatOpts): Promise<T extends unkno
         model,
         stream: false,
         keep_alive: keepAlive,
+        // gemma4 thinks by default when `think` is unset. Measured 2026-09-23 on
+        // one lecture excerpt: 1217 output tokens with thinking, 454 without, for
+        // answers of the same length — the rest was reasoning nobody reads, at
+        // ~2.7x the generation time on every summary and chapter call.
+        think: process.env.OLLAMA_THINK === "true",
         ...(schema ? { format: schema } : {}),
         options: { temperature, num_ctx: numCtx },
         messages: [
